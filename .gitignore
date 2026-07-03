@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+encrypted_pin.bin
+**/firebase-adminsdk-*.json
+**/service-account*.json
+**/*admin*sdk*.json
+**/*adminsdk*.json
+
+# Virtual environment
+SAHL/
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Dataset (50K files, 398MB — not part of runtime)
+archive/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
