@@ -165,9 +165,13 @@ def _log_event(db, bucket, user_id, image_bytes, similarity, confidence):
     from firebase_admin import firestore
 
     ts = int(time.time())
-    blob = bucket.blob(f"logs/{user_id}/{ts}.jpg")
-    blob.upload_from_string(image_bytes, content_type="image/jpeg")
-    image_url = blob.public_url
+    image_url = None
+    try:
+        blob = bucket.blob(f"logs/{user_id}/{ts}.jpg")
+        blob.upload_from_string(image_bytes, content_type="image/jpeg")
+        image_url = blob.public_url
+    except Exception as gcs_error:
+        logger.warning("GCS upload failed (continuing): %s", gcs_error)
 
     db.collection("logs").add({
         "user_id": user_id,
