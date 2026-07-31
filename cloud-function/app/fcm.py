@@ -116,7 +116,7 @@ def deactivate_device_token(db, user_id: str, token: str) -> bool:
 
 def _build_notification_title_body(confidence: str, user_id: str, method: str) -> tuple[str, str]:
     """Build human-readable title and body for unlock notification."""
-    if method == "pin":
+    if method.upper() == "PIN":
         return ("Door Unlocked", f"{user_id} unlocked via PIN")
     elif confidence == "HIGH":
         return ("Door Unlocked", f"{user_id} unlocked (high confidence)")
