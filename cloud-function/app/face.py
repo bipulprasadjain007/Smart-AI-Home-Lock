@@ -4,17 +4,28 @@ Uses InsightFace with buffalo_l model pack for:
   - Face detection (SCRFD-10GF)
   - Face alignment (2d106 + 3d68 landmarks)
   - Face recognition (ResNet50@WebFace600K → 512-dim embeddings)
+
+On Cloud Functions, models are downloaded from GCS on cold start
+to avoid exceeding deployment size limits.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 from typing import List, Optional
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+MODEL_FILES = [
+    "det_10g.onnx",
+    "w600k_r50.onnx",
+    "2d106det.onnx",
+]
 
 
 class ModelNotReadyError(RuntimeError):
@@ -39,13 +50,20 @@ class FaceEngine:
         model_name: str = "buffalo_l",
         det_size: tuple = (640, 640),
         providers: Optional[list] = None,
+        gcs_bucket: Optional[object] = None,
+        model_root: str = "/tmp/.insightface",
     ):
         """Initialize the face engine with a specific model pack.
+
+        On Cloud Functions, models are downloaded from GCS.
+        Locally, uses ~/.insightface/models/ if models already exist there.
 
         Args:
             model_name: InsightFace model pack name (default: "buffalo_l")
             det_size: Detection input size as (width, height)
             providers: ONNX Runtime providers (default: auto-detect)
+            gcs_bucket: Google Cloud Storage Bucket for model download
+            model_root: Local directory for model storage (/tmp/.insightface)
 
         Raises:
             RuntimeError: If model initialization or download fails
@@ -53,8 +71,49 @@ class FaceEngine:
         self._model = None
         self._det_size = det_size
         self._model_name = model_name
+        self._model_root = model_root
 
+        self._ensure_models(gcs_bucket)
         self._initialize_model(providers)
+
+    def _ensure_models(self, gcs_bucket: Optional[object] = None) -> None:
+        """Ensure local ONNX model files exist, downloading from GCS if needed.
+
+        Args:
+            gcs_bucket: Google Cloud Storage Bucket (or None for local dev)
+        """
+        local_model_dir = os.path.join(self._model_root, self._model_name)
+
+        # Check if models already exist locally
+        all_present = all(
+            os.path.isfile(os.path.join(local_model_dir, f))
+            for f in MODEL_FILES
+        )
+
+        if all_present:
+            logger.info("Using cached models at %s", local_model_dir)
+            return
+
+        # Try GCS download
+        if gcs_bucket is not None:
+            os.makedirs(local_model_dir, exist_ok=True)
+            for model_file in MODEL_FILES:
+                gcs_path = f"models/{self._model_name}/{model_file}"
+                local_path = os.path.join(local_model_dir, model_file)
+                if not os.path.isfile(local_path):
+                    blob = gcs_bucket.blob(gcs_path)
+                    if blob.exists():
+                        logger.info("Downloading %s from GCS...", model_file)
+                        blob.download_to_filename(local_path)
+                    else:
+                        logger.warning("Model %s not found in GCS", gcs_path)
+            return
+
+        # Local dev: models should be in ~/.insightface/models/
+        logger.info(
+            "No GCS bucket configured; InsightFace will auto-download models "
+            "from internet if needed"
+        )
 
     def _initialize_model(self, providers: Optional[list] = None) -> None:
         """Download (if needed) and initialize the InsightFace model.
@@ -71,6 +130,8 @@ class FaceEngine:
             kwargs = {"name": self._model_name}
             if providers is not None:
                 kwargs["providers"] = providers
+
+            kwargs["root"] = self._model_root
 
             self._model = FaceAnalysis(**kwargs)
             self._model.prepare(ctx_id=0, det_size=self._det_size)

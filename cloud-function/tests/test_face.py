@@ -74,7 +74,7 @@ class TestFaceEngineInitialization:
     def test_engine_initializes_with_buffalo_l(self, mock_insightface_app):
         mock_instance, mock_class = mock_insightface_app
         engine = FaceEngine(model_name="buffalo_l", det_size=(640, 640))
-        mock_class.assert_called_once_with(name="buffalo_l")
+        mock_class.assert_called_once_with(name="buffalo_l", root="/tmp/.insightface")
         mock_instance.prepare.assert_called_once_with(ctx_id=0, det_size=(640, 640))
         assert engine._model is not None
 
@@ -90,7 +90,7 @@ class TestFaceEngineInitialization:
             providers=["CPUExecutionProvider"],
         )
         mock_class.assert_called_once_with(
-            name="antelopev2", providers=["CPUExecutionProvider"]
+            name="antelopev2", providers=["CPUExecutionProvider"], root="/tmp/.insightface"
         )
 
     def test_engine_raises_on_prepare_failure(self, mock_insightface_app):

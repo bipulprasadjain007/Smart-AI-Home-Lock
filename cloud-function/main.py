@@ -28,14 +28,19 @@ logging.basicConfig(level=logging.INFO)
 # --- Firebase Admin SDK ---
 # Supports both local dev (with .env GOOGLE_APPLICATION_CREDENTIALS path)
 # and Cloud Functions deployment (uses Application Default Credentials).
-_CRED_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+_CRED_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
 _STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "")
+_PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+
+_fb_options = {}
+if _PROJECT_ID:
+    _fb_options["projectId"] = _PROJECT_ID
 
 if _CRED_PATH and os.path.isfile(_CRED_PATH):
     cred = credentials.Certificate(_CRED_PATH)
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initialize_app(cred, options=_fb_options if _fb_options else None)
 else:
-    firebase_admin.initialize_app()
+    firebase_admin.initialize_app(options=_fb_options if _fb_options else None)
 
 db = firestore.client()
 bucket = gcs.Client().bucket(_STORAGE_BUCKET) if _STORAGE_BUCKET else None
@@ -43,7 +48,7 @@ bucket = gcs.Client().bucket(_STORAGE_BUCKET) if _STORAGE_BUCKET else None
 # --- InsightFace model ---
 _det_size_raw = os.environ.get("DETECTION_SIZE", "640,640")
 _det_size = tuple(int(x) for x in _det_size_raw.split(",")[:2])
-face_engine = FaceEngine(model_name="buffalo_l", det_size=_det_size)
+face_engine = FaceEngine(model_name="buffalo_l", det_size=_det_size, gcs_bucket=bucket)
 
 # --- AES-256 key ---
 aes_key = bytes.fromhex(os.environ["AES_KEY"])
