@@ -1,9 +1,11 @@
 """API route handlers for the Smart AI Home Lock cloud function.
 
 Endpoints:
-  POST /api/register  — Register user with 5 encrypted face images
-  POST /api/unlock    — Face unlock with 3-tier confidence matching
-  GET  /api/health    — Health check
+  POST /api/register     — Register user with 5 encrypted face images
+  POST /api/unlock       — Face unlock with 3-tier confidence matching
+  POST /api/set_pin      — Set a 6-digit PIN for a user (bcrypt hashed)
+  POST /api/pin_unlock   — Verify PIN against stored bcrypt hash
+  GET  /api/health       — Health check
 """
 
 import re
@@ -11,15 +13,22 @@ import time
 import traceback
 import logging
 
+import bcrypt
 import numpy as np
 from flask import current_app, jsonify, request
 
 from app.encryption import aes_gcm_decrypt
 from app.similarity import cosine_similarity
+from app.learning import (
+    compute_weighted_similarity,
+    store_adaptive_embedding,
+    prune_adaptive_embeddings,
+)
 
 logger = logging.getLogger(__name__)
 
 USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,100}$")
+PIN_PATTERN = re.compile(r"^\d{6}$")
 THRESHOLD_HIGH = 0.75
 THRESHOLD_MEDIUM_HIGH = 0.70
 THRESHOLD_MEDIUM = 0.60
@@ -28,12 +37,16 @@ THRESHOLD_MEDIUM = 0.60
 def register_routes(app):
     app.add_url_rule("/api/register", "register", register, methods=["POST"])
     app.add_url_rule("/api/unlock", "unlock", unlock, methods=["POST"])
+    app.add_url_rule("/api/set_pin", "set_pin", set_pin, methods=["POST"])
+    app.add_url_rule("/api/pin_unlock", "pin_unlock", pin_unlock, methods=["POST"])
     app.add_url_rule("/api/health", "health", health, methods=["GET"])
 
 
 def health():
     return jsonify({"status": "ok"}), 200
 
+
+# ── Registration ────────────────────────────────────────────────────────
 
 def register():
     try:
@@ -80,6 +93,8 @@ def register():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Face Unlock (with continuous learning) ──────────────────────────────
+
 def unlock():
     try:
         encrypted_data = request.data
@@ -104,20 +119,28 @@ def unlock():
 
         embedding_np = np.array(embedding, dtype=np.float64)
         users = db.collection("users").stream()
+        now = time.time()
 
         best_user_id = None
-        best_similarity = 0.0
+        best_raw_similarity = 0.0
+        best_weighted_similarity = 0.0
+        best_user_data = None
 
         for user_snap in users:
             user_data = user_snap.to_dict()
-            for img_key in ("image1", "image2", "image3", "image4", "image5"):
-                stored_emb = user_data.get(img_key)
-                if stored_emb is None:
-                    continue
-                sim = cosine_similarity(embedding_np, stored_emb)
-                if sim > best_similarity:
-                    best_similarity = sim
-                    best_user_id = user_snap.id
+
+            weighted = compute_weighted_similarity(embedding, user_data, now=now)
+            if weighted > best_weighted_similarity:
+                best_weighted_similarity = weighted
+                best_user_id = user_snap.id
+                best_user_data = user_data
+
+                for img_key in ("image1", "image2", "image3", "image4", "image5"):
+                    stored_emb = user_data.get(img_key)
+                    if stored_emb is not None:
+                        raw = cosine_similarity(embedding_np, stored_emb)
+                        if raw > best_raw_similarity:
+                            best_raw_similarity = raw
 
         if best_user_id is None:
             return jsonify({
@@ -126,31 +149,126 @@ def unlock():
                 "weighted_similarity": 0.0,
             }), 200
 
-        confidence = _confidence_label(best_similarity)
+        confidence = _confidence_label(best_weighted_similarity)
 
-        if best_similarity >= THRESHOLD_MEDIUM:
-            _log_event(db, bucket, best_user_id, decrypted, best_similarity, confidence)
+        if best_weighted_similarity >= THRESHOLD_MEDIUM:
+            _log_event(db, bucket, best_user_id, decrypted,
+                       best_weighted_similarity, confidence)
+
+            if best_weighted_similarity < THRESHOLD_HIGH and best_user_data is not None:
+                store_adaptive_embedding(db, best_user_id, embedding, timestamp=now)
+                prune_adaptive_embeddings(db, best_user_id, best_user_data,
+                                          embedding, now=now)
+
             logger.info(
-                "UNLOCK user=%s similarity=%.4f confidence=%s",
-                best_user_id, best_similarity, confidence,
+                "UNLOCK user=%s raw=%.4f weighted=%.4f confidence=%s",
+                best_user_id, best_raw_similarity, best_weighted_similarity, confidence,
             )
             return jsonify({
                 "status": "UNLOCK",
-                "similarity": round(best_similarity, 6),
-                "weighted_similarity": round(best_similarity, 6),
+                "similarity": round(best_raw_similarity, 6),
+                "weighted_similarity": round(best_weighted_similarity, 6),
                 "confidence": confidence,
             }), 200
         else:
+            logger.info(
+                "NO_MATCH user=%s raw=%.4f weighted=%.4f",
+                best_user_id, best_raw_similarity, best_weighted_similarity,
+            )
             return jsonify({
                 "status": "NO_MATCH",
-                "similarity": round(best_similarity, 6),
-                "weighted_similarity": round(best_similarity, 6),
+                "similarity": round(best_raw_similarity, 6),
+                "weighted_similarity": round(best_weighted_similarity, 6),
             }), 200
 
     except Exception as e:
         logger.error("unlock error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
+
+# ── PIN Auth ─────────────────────────────────────────────────────────────
+
+def set_pin():
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        if not USER_ID_PATTERN.match(user_id):
+            return jsonify({"error": "Invalid or missing user_id"}), 400
+
+        encrypted_data = request.data
+        if not encrypted_data or len(encrypted_data) < 28:
+            return jsonify({"error": "Empty or invalid payload"}), 400
+
+        key = current_app.config["AES_KEY"]
+        db = current_app.config["DB"]
+
+        try:
+            plaintext = aes_gcm_decrypt(encrypted_data, key)
+        except (ValueError, TypeError, IndexError) as e:
+            logger.warning("set_pin decrypt failed: %s", e)
+            return jsonify({"error": "Encryption error"}), 400
+
+        pin = plaintext.decode("utf-8").strip()
+        if not PIN_PATTERN.match(pin):
+            return jsonify({"error": "PIN must be exactly 6 digits"}), 400
+
+        hashed = bcrypt.hashpw(pin.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+        db.collection("pins").document(user_id).set({
+            "hash": hashed,
+            "updated_at": time.time(),
+        })
+
+        logger.info("PIN set for user=%s", user_id)
+        return jsonify({"status": "PIN set", "user_id": user_id}), 200
+
+    except Exception as e:
+        logger.error("set_pin error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+def pin_unlock():
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        if not USER_ID_PATTERN.match(user_id):
+            return jsonify({"error": "Invalid or missing user_id"}), 400
+
+        encrypted_data = request.data
+        if not encrypted_data or len(encrypted_data) < 28:
+            return jsonify({"error": "Empty or invalid payload"}), 400
+
+        key = current_app.config["AES_KEY"]
+        db = current_app.config["DB"]
+
+        try:
+            plaintext = aes_gcm_decrypt(encrypted_data, key)
+        except (ValueError, TypeError, IndexError) as e:
+            logger.warning("pin_unlock decrypt failed: %s", e)
+            return jsonify({"error": "Encryption error"}), 400
+
+        pin = plaintext.decode("utf-8").strip()
+        if not PIN_PATTERN.match(pin):
+            return jsonify({"error": "Invalid PIN format"}), 400
+
+        pin_snap = db.collection("pins").document(user_id).get()
+        if not pin_snap.exists:
+            _pin_log(db, user_id, success=False)
+            return jsonify({"status": "DENIED", "method": "PIN"}), 200
+
+        stored_hash = pin_snap.to_dict().get("hash", "")
+        if bcrypt.checkpw(pin.encode("utf-8"), stored_hash.encode("utf-8")):
+            _pin_log(db, user_id, success=True)
+            logger.info("PIN UNLOCK user=%s", user_id)
+            return jsonify({"status": "UNLOCK", "method": "PIN"}), 200
+        else:
+            _pin_log(db, user_id, success=False)
+            return jsonify({"status": "DENIED", "method": "PIN"}), 200
+
+    except Exception as e:
+        logger.error("pin_unlock error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────
 
 def _confidence_label(similarity):
     if similarity >= THRESHOLD_HIGH:
@@ -179,4 +297,16 @@ def _log_event(db, bucket, user_id, image_bytes, similarity, confidence):
         "image_url": image_url,
         "similarity": similarity,
         "confidence": confidence,
+        "method": "FACE",
+    })
+
+
+def _pin_log(db, user_id, success):
+    from firebase_admin import firestore
+
+    db.collection("logs").add({
+        "user_id": user_id,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+        "method": "PIN",
+        "success": success,
     })
