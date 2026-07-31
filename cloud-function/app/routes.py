@@ -1,13 +1,15 @@
 """API route handlers for the Smart AI Home Lock cloud function.
 
 Endpoints:
-  POST   /api/register     — Register user with 5 encrypted face images
-  POST   /api/unlock       — Face unlock with 3-tier confidence matching
-  POST   /api/set_pin      — Set a 6-digit PIN for a user (bcrypt hashed)
-  POST   /api/pin_unlock   — Verify PIN against stored bcrypt hash
-  DELETE /api/user         — Delete a user and their PIN
-  GET    /api/logs         — Retrieve unlock/pin logs with pagination
-  GET    /api/health       — Health check
+  POST   /api/register          — Register user with 5 encrypted face images
+  POST   /api/unlock            — Face unlock with 3-tier confidence matching
+  POST   /api/set_pin           — Set a 6-digit PIN for a user (bcrypt hashed)
+  POST   /api/pin_unlock        — Verify PIN against stored bcrypt hash
+  POST   /api/register_device   — Register an FCM device token
+  POST   /api/deregister_device — Deactivate an FCM device token
+  DELETE /api/user              — Delete a user and their PIN
+  GET    /api/logs              — Retrieve unlock/pin logs with pagination
+  GET    /api/health            — Health check
 """
 
 import re
@@ -26,6 +28,11 @@ from app.learning import (
     store_adaptive_embedding,
     prune_adaptive_embeddings,
 )
+from app.fcm import (
+    store_device_token,
+    deactivate_device_token,
+    send_unlock_notification,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +48,8 @@ def register_routes(app):
     app.add_url_rule("/api/unlock", "unlock", unlock, methods=["POST"])
     app.add_url_rule("/api/set_pin", "set_pin", set_pin, methods=["POST"])
     app.add_url_rule("/api/pin_unlock", "pin_unlock", pin_unlock, methods=["POST"])
+    app.add_url_rule("/api/register_device", "register_device", register_device, methods=["POST"])
+    app.add_url_rule("/api/deregister_device", "deregister_device", deregister_device, methods=["POST"])
     app.add_url_rule("/api/user", "remove_user", remove_user, methods=["DELETE"])
     app.add_url_rule("/api/logs", "get_logs", get_logs, methods=["GET"])
     app.add_url_rule("/api/health", "health", health, methods=["GET"])
@@ -156,8 +165,16 @@ def unlock():
         confidence = _confidence_label(best_weighted_similarity)
 
         if best_weighted_similarity >= THRESHOLD_MEDIUM:
-            _log_event(db, bucket, best_user_id, decrypted,
-                       best_weighted_similarity, confidence)
+            image_url = _log_event(db, bucket, best_user_id, decrypted,
+                                   best_weighted_similarity, confidence)
+
+            try:
+                send_unlock_notification(
+                    db, best_user_id, confidence, best_raw_similarity,
+                    method="FACE", image_url=image_url,
+                )
+            except Exception:
+                pass  # FCM must never crash unlock
 
             if best_weighted_similarity < THRESHOLD_HIGH and best_user_data is not None:
                 store_adaptive_embedding(db, best_user_id, embedding, timestamp=now)
@@ -262,6 +279,15 @@ def pin_unlock():
         if bcrypt.checkpw(pin.encode("utf-8"), stored_hash.encode("utf-8")):
             _pin_log(db, user_id, success=True)
             logger.info("PIN UNLOCK user=%s", user_id)
+
+            try:
+                send_unlock_notification(
+                    db, user_id, confidence="N/A", similarity=1.0,
+                    method="PIN",
+                )
+            except Exception:
+                pass  # FCM must never crash unlock
+
             return jsonify({"status": "UNLOCK", "method": "PIN"}), 200
         else:
             _pin_log(db, user_id, success=False)
@@ -269,6 +295,70 @@ def pin_unlock():
 
     except Exception as e:
         logger.error("pin_unlock error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+# ── FCM Device Token Management ──────────────────────────────────────────
+
+def register_device():
+    try:
+        data = request.get_json(silent=True) or {}
+        user_id = (data.get("user_id") or "").strip()
+        token = (data.get("token") or "").strip()
+        platform = data.get("platform", "android")
+        device_name = data.get("device_name")
+
+        if not user_id:
+            return jsonify({"error": "Missing user_id"}), 400
+        if not USER_ID_PATTERN.match(user_id):
+            return jsonify({"error": "Invalid user_id format"}), 400
+        if not token:
+            return jsonify({"error": "Missing or empty token"}), 400
+
+        db = current_app.config["DB"]
+        doc_id = store_device_token(
+            db, user_id, token,
+            platform=platform,
+            device_name=device_name,
+            app_type="user",
+        )
+
+        logger.info("Device registered for user=%s device=%s", user_id, doc_id)
+        return jsonify({
+            "status": "Device registered",
+            "user_id": user_id,
+            "device_id": doc_id,
+        }), 200
+
+    except Exception as e:
+        logger.error("register_device error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+def deregister_device():
+    try:
+        data = request.get_json(silent=True) or {}
+        user_id = (data.get("user_id") or "").strip()
+        token = (data.get("token") or "").strip()
+
+        if not user_id:
+            return jsonify({"error": "Missing user_id"}), 400
+        if not USER_ID_PATTERN.match(user_id):
+            return jsonify({"error": "Invalid user_id format"}), 400
+        if not token:
+            return jsonify({"error": "Missing or empty token"}), 400
+
+        db = current_app.config["DB"]
+        deactivate_device_token(db, user_id, token)
+
+        logger.info("Device deregistered for user=%s", user_id)
+        return jsonify({
+            "status": "Device deregistered",
+            "user_id": user_id,
+        }), 200
+
+    except Exception as e:
+        logger.error("deregister_device error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
@@ -409,6 +499,7 @@ def _log_event(db, bucket, user_id, image_bytes, similarity, confidence):
         "confidence": confidence,
         "method": "FACE",
     })
+    return image_url
 
 
 def _pin_log(db, user_id, success):

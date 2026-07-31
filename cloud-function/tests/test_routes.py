@@ -70,9 +70,104 @@ def mock_firestore():
     Stores documents in a simple nested dict so that set/stream/get are
     internally consistent. This lets us test that register writes correct
     data and unlock reads it back.
+
+    Also supports nested subcollections on documents (e.g.
+    users/{id}/devices/{token}) via a _collection() method on documents.
+    Subcollection data is stored inside the document dict using _sc_<name>
+    keys — safe because real Firestore never returns subcollections in
+    to_dict().
     """
     db = MagicMock()
     db._storage = {}  # {collection_name: {doc_id: {data}}}
+
+    def _make_subcollection(parent_doc_data, parent_doc_id, sub_name):
+        """Build a subcollection mock stored inside parent_doc_data."""
+        sc_key = f"_sc_{sub_name}"
+        if sc_key not in parent_doc_data:
+            parent_doc_data[sc_key] = {}
+        sc_data = parent_doc_data[sc_key]
+
+        sc = MagicMock()
+
+        def _sc_document(sc_doc_id=None):
+            if sc_doc_id is None:
+                sc_doc_id = f"auto_{len(sc_data)}"
+            if sc_doc_id not in sc_data:
+                sc_data[sc_doc_id] = {}
+
+            sc_doc = MagicMock()
+            sc_doc.id = sc_doc_id
+
+            def _sc_set(data):
+                sc_data[sc_doc_id] = data
+
+            def _sc_update(data):
+                sc_data[sc_doc_id].update(data)
+
+            def _sc_delete():
+                sc_data.pop(sc_doc_id, None)
+
+            sc_doc.set = _sc_set
+            sc_doc.update = _sc_update
+            sc_doc.delete = _sc_delete
+            sc_doc.reference = MagicMock()
+            sc_doc.reference.id = sc_doc_id
+            sc_doc.reference.update = _sc_update
+            return sc_doc
+
+        def _sc_where(field, op, value):
+            q = MagicMock()
+            q._limit_val = None
+
+            def _limit(n):
+                q._limit_val = n
+                return q
+
+            def _get_results():
+                results = []
+                for d_id, d_data in sc_data.items():
+                    if op == "==" and d_data.get(field) == value:
+                        snap = MagicMock()
+                        snap.id = d_id
+                        snap.to_dict.return_value = dict(d_data)
+                        snap.exists = True
+                        snap.get = lambda key, d=d_data: d.get(key)
+                        snap.reference = MagicMock()
+                        snap.reference.id = d_id
+                        snap.reference.update = lambda u_data, sd=sc_data, did=d_id: sd[did].update(u_data)
+                        results.append(snap)
+                if q._limit_val is not None:
+                    results = results[:q._limit_val]
+                return results
+
+            q.limit = _limit
+            q.get = _get_results
+            q.stream = _get_results
+            return q
+
+        def _sc_stream():
+            snaps = []
+            for d_id, d_data in sc_data.items():
+                snap = MagicMock()
+                snap.id = d_id
+                snap.to_dict.return_value = dict(d_data)
+                snap.exists = True
+                snap.get = lambda key, d=d_data: d.get(key)
+                snaps.append(snap)
+            return snaps
+
+        def _sc_add(data):
+            auto_id = f"auto_{len(sc_data)}"
+            sc_data[auto_id] = data
+            doc = MagicMock()
+            doc.id = auto_id
+            return doc
+
+        sc.document = _sc_document
+        sc.stream = _sc_stream
+        sc.where = _sc_where
+        sc.add = _sc_add
+        return sc
 
     def _collection(name):
         col = MagicMock()
@@ -80,14 +175,15 @@ def mock_firestore():
         col._storage = db._storage.setdefault(name, {})
 
         def _document(doc_id):
+            if doc_id not in col._storage:
+                col._storage[doc_id] = {}
+
             doc = MagicMock()
             doc._id = doc_id
             doc._name = name
 
             def _set(data):
-                doc._data = data
                 col._storage[doc_id] = data
-                return None
 
             def _delete():
                 col._storage.pop(doc_id, None)
@@ -105,10 +201,14 @@ def mock_firestore():
                     snap.id = doc_id
                 return snap
 
+            def _doc_collection(sc_name):
+                """Subcollection nested under this document."""
+                return _make_subcollection(col._storage[doc_id], doc_id, sc_name)
+
             doc.set = _set
             doc.get = _get
             doc.delete = _delete
-            doc._data = col._storage.get(doc_id, {})
+            doc.collection = _doc_collection
             return doc
 
         def _stream():
@@ -886,3 +986,264 @@ class TestLogsEndpoint:
         assert logs[0]["timestamp"] == 5000.0
         assert logs[1]["timestamp"] == 3000.0
         assert logs[2]["timestamp"] == 1000.0
+
+
+# ─── FCM Device Registration Tests ──────────────────────────────────────
+
+class TestRegisterDeviceEndpoint:
+    def test_register_device_success(self, client, mock_firestore):
+        """POST valid JSON returns 200 with device_id."""
+        response = client.post(
+            "/api/register_device",
+            data=json.dumps({
+                "user_id": "user_001",
+                "token": "fcm-token-abc",
+                "platform": "android",
+                "device_name": "John's Phone",
+            }),
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "Device registered"
+        assert body["user_id"] == "user_001"
+        assert "device_id" in body
+
+        # Verify the token is stored in the subcollection
+        user_data = mock_firestore._storage["users"]["user_001"]
+        sc_devices = user_data["_sc_devices"]
+        assert len(sc_devices) == 1
+        stored = list(sc_devices.values())[0]
+        assert stored["token"] == "fcm-token-abc"
+        assert stored["is_active"] is True
+
+    def test_register_device_missing_user_id(self, client):
+        """Missing user_id returns 400."""
+        response = client.post(
+            "/api/register_device",
+            data=json.dumps({"token": "fcm-token"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "user_id" in body["error"].lower()
+
+    def test_register_device_missing_token(self, client):
+        """Missing token returns 400."""
+        response = client.post(
+            "/api/register_device",
+            data=json.dumps({"user_id": "user_001"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "token" in body["error"].lower()
+
+    def test_register_device_invalid_user_id(self, client):
+        """Special characters in user_id should return 400."""
+        response = client.post(
+            "/api/register_device",
+            data=json.dumps({
+                "user_id": "user/../etc",
+                "token": "fcm-token",
+            }),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+    def test_register_device_empty_token(self, client):
+        """Empty token string returns 400."""
+        response = client.post(
+            "/api/register_device",
+            data=json.dumps({
+                "user_id": "user_001",
+                "token": "",
+            }),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "token" in body["error"].lower()
+
+
+# ─── FCM Device Deregistration Tests ────────────────────────────────────
+
+class TestDeregisterDeviceEndpoint:
+    def test_deregister_device_success(self, client, mock_firestore):
+        """Register then deregister, verify 200."""
+        # First register
+        client.post(
+            "/api/register_device",
+            data=json.dumps({"user_id": "user_dr", "token": "tok-xyz"}),
+            content_type="application/json",
+        )
+        # Then deregister
+        response = client.post(
+            "/api/deregister_device",
+            data=json.dumps({"user_id": "user_dr", "token": "tok-xyz"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "Device deregistered"
+        assert body["user_id"] == "user_dr"
+
+        # Verify token is deactivated
+        user_data = mock_firestore._storage["users"]["user_dr"]
+        sc_devices = user_data["_sc_devices"]
+        stored = list(sc_devices.values())[0]
+        assert stored["is_active"] is False
+
+    def test_deregister_device_nonexistent(self, client):
+        """Deregistering a nonexistent token returns 200 (idempotent)."""
+        response = client.post(
+            "/api/deregister_device",
+            data=json.dumps({"user_id": "ghost", "token": "no-such-token"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "Device deregistered"
+
+    def test_deregister_device_missing_user_id(self, client):
+        """Missing user_id returns 400."""
+        response = client.post(
+            "/api/deregister_device",
+            data=json.dumps({"token": "fcm-token"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "user_id" in body["error"].lower()
+
+    def test_deregister_device_missing_token(self, client):
+        """Missing token returns 400."""
+        response = client.post(
+            "/api/deregister_device",
+            data=json.dumps({"user_id": "user_001"}),
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "token" in body["error"].lower()
+
+
+# ─── FCM Integration in Unlock / PIN Unlock Tests ───────────────────────
+
+class TestFcmUnlockIntegration:
+    """Verify send_unlock_notification is called at the right times."""
+
+    @patch("app.routes.send_unlock_notification")
+    def test_fcm_called_on_high_unlock(
+        self, mock_send, client, encrypted_jpeg, mock_firestore,
+    ):
+        """After a HIGH-confidence face unlock, FCM is called."""
+        # Register a user first
+        client.post(
+            "/api/register",
+            data={
+                "user_id": "fcm_alice",
+                "image1": (io.BytesIO(encrypted_jpeg), "image1.jpg"),
+                "image2": (io.BytesIO(encrypted_jpeg), "image2.jpg"),
+                "image3": (io.BytesIO(encrypted_jpeg), "image3.jpg"),
+                "image4": (io.BytesIO(encrypted_jpeg), "image4.jpg"),
+                "image5": (io.BytesIO(encrypted_jpeg), "image5.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        # Unlock (same embedding → HIGH confidence)
+        response = client.post("/api/unlock", data=encrypted_jpeg)
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "UNLOCK"
+        assert body["confidence"] == "HIGH"
+
+        # FCM should have been called
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        assert call_args[0][1] == "fcm_alice"  # user_id (positional arg 1)
+        assert call_args[0][2] == "HIGH"        # confidence (positional arg 2)
+        assert call_args[1]["method"] == "FACE"
+
+    @patch("app.routes.send_unlock_notification")
+    def test_fcm_called_on_medium_unlock(
+        self, mock_send, client, mock_firestore, mock_face_embedding,
+        mock_face_engine, test_key,
+    ):
+        """After a MEDIUM-confidence face unlock, FCM is called."""
+        # Pre-populate a user with an embedding that will give ~0.65 cosine sim
+        ref = np.array(mock_face_embedding, dtype=np.float64)
+
+        # Build a second unit vector at ~0.65 cosine similarity to ref
+        rng = np.random.default_rng(123)
+        u = rng.normal(0, 1, 512)
+        u = u - np.dot(u, ref) * ref       # make orthogonal to ref
+        u = u / np.linalg.norm(u)
+        target_sim = 0.65
+        emb_medium = target_sim * ref + np.sqrt(1 - target_sim ** 2) * u
+        emb_medium = emb_medium / np.linalg.norm(emb_medium)
+
+        mock_firestore._storage.setdefault("users", {})["fcm_bob"] = {
+            "image1": emb_medium.tolist(),
+            "image2": emb_medium.tolist(),
+            "image3": emb_medium.tolist(),
+            "image4": emb_medium.tolist(),
+            "image5": emb_medium.tolist(),
+        }
+
+        # Encrypt a test JPEG for the unlock payload
+        plaintext = os.urandom(60 * 1024)
+        encrypted = aes_gcm_encrypt(plaintext, test_key)
+
+        response = client.post("/api/unlock", data=encrypted)
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "UNLOCK"
+        assert body["confidence"] in ("MEDIUM", "MEDIUM-HIGH")
+
+        # FCM should have been called
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        assert call_args[0][1] == "fcm_bob"
+        assert call_args[1]["method"] == "FACE"
+
+    @patch("app.routes.send_unlock_notification")
+    def test_fcm_not_called_on_no_match(
+        self, mock_send, client, encrypted_jpeg,
+    ):
+        """NO_MATCH → FCM is NOT called."""
+        response = client.post("/api/unlock", data=encrypted_jpeg)
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "NO_MATCH"
+
+        # FCM must NOT be called
+        mock_send.assert_not_called()
+
+    @patch("app.routes.send_unlock_notification")
+    def test_fcm_called_on_pin_unlock(
+        self, mock_send, client, mock_firestore, test_key,
+    ):
+        """After a successful PIN unlock, FCM is called."""
+        # Set a PIN for the user
+        pin_plaintext = b"123456"
+        pin_encrypted = aes_gcm_encrypt(pin_plaintext, test_key)
+
+        client.post("/api/set_pin?user_id=pin_fcm_user", data=pin_encrypted)
+
+        # Unlock with correct PIN
+        response = client.post(
+            "/api/pin_unlock?user_id=pin_fcm_user", data=pin_encrypted,
+        )
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "UNLOCK"
+        assert body["method"] == "PIN"
+
+        # FCM should have been called with PIN method
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args
+        assert call_args[0][1] == "pin_fcm_user"  # user_id
+        assert call_args[1]["method"] == "PIN"
+        assert call_args[1]["confidence"] == "N/A"
