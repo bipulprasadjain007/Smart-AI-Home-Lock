@@ -1,11 +1,13 @@
 """API route handlers for the Smart AI Home Lock cloud function.
 
 Endpoints:
-  POST /api/register     — Register user with 5 encrypted face images
-  POST /api/unlock       — Face unlock with 3-tier confidence matching
-  POST /api/set_pin      — Set a 6-digit PIN for a user (bcrypt hashed)
-  POST /api/pin_unlock   — Verify PIN against stored bcrypt hash
-  GET  /api/health       — Health check
+  POST   /api/register     — Register user with 5 encrypted face images
+  POST   /api/unlock       — Face unlock with 3-tier confidence matching
+  POST   /api/set_pin      — Set a 6-digit PIN for a user (bcrypt hashed)
+  POST   /api/pin_unlock   — Verify PIN against stored bcrypt hash
+  DELETE /api/user         — Delete a user and their PIN
+  GET    /api/logs         — Retrieve unlock/pin logs with pagination
+  GET    /api/health       — Health check
 """
 
 import re
@@ -39,6 +41,8 @@ def register_routes(app):
     app.add_url_rule("/api/unlock", "unlock", unlock, methods=["POST"])
     app.add_url_rule("/api/set_pin", "set_pin", set_pin, methods=["POST"])
     app.add_url_rule("/api/pin_unlock", "pin_unlock", pin_unlock, methods=["POST"])
+    app.add_url_rule("/api/user", "remove_user", remove_user, methods=["DELETE"])
+    app.add_url_rule("/api/logs", "get_logs", get_logs, methods=["GET"])
     app.add_url_rule("/api/health", "health", health, methods=["GET"])
 
 
@@ -265,6 +269,112 @@ def pin_unlock():
 
     except Exception as e:
         logger.error("pin_unlock error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+# ── User Management ─────────────────────────────────────────────────────
+
+def remove_user():
+    try:
+        user_id = request.args.get("user_id", "").strip()
+        if not USER_ID_PATTERN.match(user_id):
+            return jsonify({"error": "Invalid or missing user_id"}), 400
+
+        db = current_app.config["DB"]
+        db.collection("users").document(user_id).delete()
+        db.collection("pins").document(user_id).delete()
+
+        logger.info("Deleted user=%s", user_id)
+        return jsonify({"status": "User deleted", "user_id": user_id}), 200
+
+    except Exception as e:
+        logger.error("remove_user error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Logs Retrieval ──────────────────────────────────────────────────────
+
+def get_logs():
+    try:
+        from firebase_admin import firestore
+
+        user_id = request.args.get("user_id", "").strip() or None
+        try:
+            limit = int(request.args.get("limit", 50))
+        except (ValueError, TypeError):
+            limit = 50
+        limit = min(max(1, limit), 100)
+
+        try:
+            start_after = float(request.args.get("start_after"))
+        except (TypeError, ValueError):
+            start_after = None
+
+        db = current_app.config["DB"]
+        all_logs = db.collection("logs").stream()
+
+        Sentinel = type(firestore.SERVER_TIMESTAMP)
+
+        entries = []
+        for snap in all_logs:
+            data = snap.to_dict()
+            log_id = snap.id
+
+            # Filter by user_id if provided
+            if user_id and data.get("user_id") != user_id:
+                continue
+
+            # Handle SERVER_TIMESTAMP sentinel
+            ts = data.get("timestamp")
+            if isinstance(ts, Sentinel):
+                ts = None
+
+            # Apply cursor: skip entries with timestamp >= start_after
+            if start_after is not None:
+                if ts is None or ts >= start_after:
+                    continue
+
+            entry = {
+                "log_id": log_id,
+                "user_id": data.get("user_id"),
+                "timestamp": ts,
+            }
+
+            method = data.get("method")
+            entry["method"] = method
+
+            if method == "FACE":
+                entry["similarity"] = data.get("similarity")
+                entry["confidence"] = data.get("confidence")
+            elif method == "PIN":
+                entry["success"] = data.get("success")
+
+            entry["image_url"] = data.get("image_url")
+
+            entries.append(entry)
+
+        # Sort descending by timestamp (newest first);
+        # None timestamps sort last (treated as -inf)
+        entries.sort(
+            key=lambda e: e.get("timestamp")
+            if e.get("timestamp") is not None
+            else float("-inf"),
+            reverse=True,
+        )
+
+        # Apply limit
+        limited = entries[:limit]
+
+        # Determine next_cursor: oldest timestamp in this page, or null
+        if len(limited) < len(entries):
+            next_cursor = limited[-1].get("timestamp")
+        else:
+            next_cursor = None
+
+        return jsonify({"logs": limited, "next_cursor": next_cursor}), 200
+
+    except Exception as e:
+        logger.error("get_logs error: %s\n%s", e, traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 

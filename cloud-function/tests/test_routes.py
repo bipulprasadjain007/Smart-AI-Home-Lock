@@ -89,6 +89,10 @@ def mock_firestore():
                 col._storage[doc_id] = data
                 return None
 
+            def _delete():
+                col._storage.pop(doc_id, None)
+                return None
+
             def _get():
                 snap = MagicMock()
                 if doc_id in col._storage:
@@ -103,6 +107,7 @@ def mock_firestore():
 
             doc.set = _set
             doc.get = _get
+            doc.delete = _delete
             doc._data = col._storage.get(doc_id, {})
             return doc
 
@@ -117,9 +122,10 @@ def mock_firestore():
             return snapshots
 
         def _add(data):
+            doc_id = f"auto_{len(col._storage)}"
             doc = MagicMock()
-            doc.add = MagicMock()
-            col._storage[f"auto_{len(col._storage)}"] = data
+            doc.id = doc_id
+            col._storage[doc_id] = data
             return doc
 
         col.document = _document
@@ -612,3 +618,271 @@ class TestContentTypeValidation:
             content_type="application/json",
         )
         assert response.status_code == 400
+
+
+# ─── Remove User Tests ──────────────────────────────────────────────────
+
+class TestRemoveUserEndpoint:
+    def test_remove_user_success(self, client, encrypted_jpeg, mock_firestore):
+        """Register a user, then delete them and verify users document is gone."""
+        # Register a user first
+        client.post(
+            "/api/register",
+            data={
+                "user_id": "delete_me",
+                "image1": (io.BytesIO(encrypted_jpeg), "image1.jpg"),
+                "image2": (io.BytesIO(encrypted_jpeg), "image2.jpg"),
+                "image3": (io.BytesIO(encrypted_jpeg), "image3.jpg"),
+                "image4": (io.BytesIO(encrypted_jpeg), "image4.jpg"),
+                "image5": (io.BytesIO(encrypted_jpeg), "image5.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+        assert "delete_me" in mock_firestore._storage.get("users", {})
+
+        # Delete the user
+        response = client.delete("/api/user?user_id=delete_me")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "User deleted"
+        assert body["user_id"] == "delete_me"
+
+        # Verify users document is gone
+        assert "delete_me" not in mock_firestore._storage.get("users", {})
+
+    def test_remove_user_with_pin(self, client, encrypted_jpeg, mock_firestore, test_key):
+        """Register user + set PIN, then delete, verify both users and pins deleted."""
+        # Register user
+        client.post(
+            "/api/register",
+            data={
+                "user_id": "user_with_pin",
+                "image1": (io.BytesIO(encrypted_jpeg), "image1.jpg"),
+                "image2": (io.BytesIO(encrypted_jpeg), "image2.jpg"),
+                "image3": (io.BytesIO(encrypted_jpeg), "image3.jpg"),
+                "image4": (io.BytesIO(encrypted_jpeg), "image4.jpg"),
+                "image5": (io.BytesIO(encrypted_jpeg), "image5.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        # Set a PIN
+        pin_data = aes_gcm_encrypt(b"123456", test_key)
+        client.post("/api/set_pin?user_id=user_with_pin", data=pin_data)
+
+        assert "user_with_pin" in mock_firestore._storage.get("users", {})
+        assert "user_with_pin" in mock_firestore._storage.get("pins", {})
+
+        # Delete the user
+        response = client.delete("/api/user?user_id=user_with_pin")
+        assert response.status_code == 200
+
+        # Verify both collections are cleaned up
+        assert "user_with_pin" not in mock_firestore._storage.get("users", {})
+        assert "user_with_pin" not in mock_firestore._storage.get("pins", {})
+
+    def test_remove_nonexistent_user(self, client, mock_firestore):
+        """Deleting a nonexistent user should return 200 (idempotent)."""
+        response = client.delete("/api/user?user_id=nobody")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["status"] == "User deleted"
+        assert body["user_id"] == "nobody"
+
+    def test_remove_user_missing_user_id(self, client):
+        """No user_id param should return 400."""
+        response = client.delete("/api/user")
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "user_id" in body["error"].lower()
+
+    def test_remove_user_invalid_user_id(self, client):
+        """user_id with special characters should return 400."""
+        response = client.delete("/api/user?user_id=../etc")
+        assert response.status_code == 400
+        body = json.loads(response.data)
+        assert "user_id" in body["error"].lower()
+
+
+# ─── Logs Retrieval Tests ────────────────────────────────────────────────
+
+class TestLogsEndpoint:
+    def test_logs_empty(self, client):
+        """GET /api/logs with no logs returns empty list."""
+        response = client.get("/api/logs")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert body["logs"] == []
+        assert body["next_cursor"] is None
+
+    def test_logs_returns_face_unlock_events(
+        self, client, encrypted_jpeg, mock_firestore
+    ):
+        """Simulate a face unlock and verify the log entry is returned."""
+        # Register a user
+        client.post(
+            "/api/register",
+            data={
+                "user_id": "log_user",
+                "image1": (io.BytesIO(encrypted_jpeg), "image1.jpg"),
+                "image2": (io.BytesIO(encrypted_jpeg), "image2.jpg"),
+                "image3": (io.BytesIO(encrypted_jpeg), "image3.jpg"),
+                "image4": (io.BytesIO(encrypted_jpeg), "image4.jpg"),
+                "image5": (io.BytesIO(encrypted_jpeg), "image5.jpg"),
+            },
+            content_type="multipart/form-data",
+        )
+        # Trigger face unlock (creates a FACE log via _log_event)
+        client.post("/api/unlock", data=encrypted_jpeg)
+
+        response = client.get("/api/logs")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        logs = body["logs"]
+        assert len(logs) >= 1
+
+        log = logs[0]
+        assert "log_id" in log
+        assert log["user_id"] == "log_user"
+        assert log["method"] == "FACE"
+        assert "similarity" in log
+        assert "confidence" in log
+        assert "image_url" in log
+
+    def test_logs_filter_by_user_id(self, client, mock_firestore):
+        """Add logs for two users, filter by one, verify only that user's logs."""
+        mock_firestore._storage["logs"] = {
+            "log_a1": {
+                "user_id": "alice", "timestamp": 1000.0, "method": "FACE",
+                "similarity": 0.95, "confidence": "HIGH",
+                "image_url": "http://example.com/a1.jpg",
+            },
+            "log_a2": {
+                "user_id": "alice", "timestamp": 900.0, "method": "FACE",
+                "similarity": 0.88, "confidence": "MEDIUM-HIGH",
+                "image_url": "http://example.com/a2.jpg",
+            },
+            "log_b1": {
+                "user_id": "bob", "timestamp": 950.0, "method": "PIN",
+                "success": True, "image_url": None,
+            },
+        }
+
+        response = client.get("/api/logs?user_id=alice")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        logs = body["logs"]
+        assert len(logs) == 2
+        for log in logs:
+            assert log["user_id"] == "alice"
+        assert body["next_cursor"] is None
+
+    def test_logs_limit(self, client, mock_firestore):
+        """Verify limit parameter caps the number of returned logs."""
+        logs_storage = {}
+        for i in range(60):
+            logs_storage[f"log_{i}"] = {
+                "user_id": "test_user",
+                "timestamp": float(i * 10),
+                "method": "FACE",
+                "similarity": 0.9,
+                "confidence": "HIGH",
+                "image_url": f"http://example.com/{i}.jpg",
+            }
+        mock_firestore._storage["logs"] = logs_storage
+
+        response = client.get("/api/logs")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert len(body["logs"]) == 50  # default limit
+        assert body["next_cursor"] is not None
+
+        # Explicit limit of 25
+        response = client.get("/api/logs?limit=25")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert len(body["logs"]) == 25
+
+    def test_logs_pagination(self, client, mock_firestore):
+        """Use start_after to paginate through logs."""
+        logs_storage = {}
+        for i in range(10):
+            logs_storage[f"log_{i}"] = {
+                "user_id": "test_user",
+                "timestamp": float(i * 10),
+                "method": "FACE",
+                "similarity": 0.9,
+                "confidence": "HIGH",
+                "image_url": f"http://example.com/{i}.jpg",
+            }
+        mock_firestore._storage["logs"] = logs_storage
+
+        # Get first page (newest 5)
+        response = client.get("/api/logs?limit=5")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        page1 = body["logs"]
+        assert len(page1) == 5
+        # Newest timestamps first
+        assert page1[0]["timestamp"] == 90.0
+        assert page1[4]["timestamp"] == 50.0  # 5th from top
+        cursor = body["next_cursor"]
+        assert cursor == 50.0
+
+        # Get second page using start_after
+        response = client.get(f"/api/logs?limit=5&start_after={cursor}")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        page2 = body["logs"]
+        assert len(page2) == 5
+        assert page2[0]["timestamp"] == 40.0
+        assert page2[4]["timestamp"] == 0.0
+        assert body["next_cursor"] is None  # no more pages
+
+    def test_logs_invalid_limit(self, client, mock_firestore):
+        """limit > 100 should be capped at 100."""
+        logs_storage = {}
+        for i in range(150):
+            logs_storage[f"log_{i}"] = {
+                "user_id": "test_user",
+                "timestamp": float(i),
+                "method": "FACE",
+                "similarity": 0.9,
+                "confidence": "HIGH",
+                "image_url": f"http://example.com/{i}.jpg",
+            }
+        mock_firestore._storage["logs"] = logs_storage
+
+        response = client.get("/api/logs?limit=200")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        assert len(body["logs"]) == 100
+
+    def test_logs_descending_order(self, client, mock_firestore):
+        """Logs should be returned in descending timestamp order (newest first)."""
+        mock_firestore._storage["logs"] = {
+            "log_old": {
+                "user_id": "user1", "timestamp": 1000.0, "method": "FACE",
+                "similarity": 0.80, "confidence": "MEDIUM-HIGH",
+                "image_url": "http://example.com/old.jpg",
+            },
+            "log_mid": {
+                "user_id": "user1", "timestamp": 3000.0, "method": "FACE",
+                "similarity": 0.90, "confidence": "HIGH",
+                "image_url": "http://example.com/mid.jpg",
+            },
+            "log_new": {
+                "user_id": "user1", "timestamp": 5000.0, "method": "PIN",
+                "success": True, "image_url": None,
+            },
+        }
+
+        response = client.get("/api/logs")
+        assert response.status_code == 200
+        body = json.loads(response.data)
+        logs = body["logs"]
+        assert len(logs) == 3
+        # Newest first
+        assert logs[0]["timestamp"] == 5000.0
+        assert logs[1]["timestamp"] == 3000.0
+        assert logs[2]["timestamp"] == 1000.0
