@@ -23,7 +23,7 @@ fi
 PROJECT="smart-ai-home-lock"
 REGION="us-central1"
 FUNCTION_NAME="smart-lock"
-MEMORY="2048MB"
+MEMORY="4096MB"
 TIMEOUT="540s"
 RUNTIME="python312"
 SOURCE="${SCRIPT_DIR}"
