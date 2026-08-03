@@ -1171,7 +1171,7 @@ class TestFcmUnlockIntegration:
         self, mock_send, client, mock_firestore, mock_face_embedding,
         mock_face_engine, test_key,
     ):
-        """After a MEDIUM-confidence face unlock, FCM is called."""
+        """Legacy medium matches are denied without notification or learning."""
         # Pre-populate a user with an embedding that will give ~0.65 cosine sim
         ref = np.array(mock_face_embedding, dtype=np.float64)
 
@@ -1199,14 +1199,10 @@ class TestFcmUnlockIntegration:
         response = client.post("/api/unlock", data=encrypted)
         assert response.status_code == 200
         body = json.loads(response.data)
-        assert body["status"] == "UNLOCK"
+        assert body["status"] == "DENIED"
         assert body["confidence"] in ("MEDIUM", "MEDIUM-HIGH")
 
-        # FCM should have been called
-        mock_send.assert_called_once()
-        call_args = mock_send.call_args
-        assert call_args[0][1] == "fcm_bob"
-        assert call_args[1]["method"] == "FACE"
+        mock_send.assert_not_called()
 
     @patch("app.routes.send_unlock_notification")
     def test_fcm_not_called_on_no_match(
@@ -1229,6 +1225,7 @@ class TestFcmUnlockIntegration:
         # Set a PIN for the user
         pin_plaintext = b"123456"
         pin_encrypted = aes_gcm_encrypt(pin_plaintext, test_key)
+        mock_firestore._storage.setdefault("users", {})["pin_fcm_user"] = {}
 
         client.post("/api/set_pin?user_id=pin_fcm_user", data=pin_encrypted)
 

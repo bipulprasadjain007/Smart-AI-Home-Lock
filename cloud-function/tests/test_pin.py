@@ -73,13 +73,22 @@ def mock_face_engine():
 @pytest.fixture
 def app(mock_face_engine, mock_firestore, test_key):
     from app import create_app
-    return create_app(
+    flask_app = create_app(
         face_engine=mock_face_engine,
         db=mock_firestore,
         bucket=MagicMock(),
         aes_key=test_key,
         testing=True,
     )
+    # PIN unlock now requires the target user document, even in injected test
+    # mode.  Seed the users exercised by this legacy suite explicitly.
+    mock_firestore._storage["users"] = {
+        user_id: {} for user_id in (
+            "alice", "bob", "charlie", "dave", "eve", "frank", "grace",
+            "hank", "ivan", "julia", "kate", "leo", "mia", "nina",
+        )
+    }
+    return flask_app
 
 
 @pytest.fixture
@@ -239,3 +248,54 @@ class TestPinUnlock:
 
         assert old_hash != new_hash
         assert bcrypt.checkpw(b"222222", new_hash.encode("utf-8"))
+
+
+class TestPinFailureLimiter:
+    def test_threshold_locks_device_user_pair(self, client, test_key, mock_firestore):
+        mock_firestore._storage["users"]["hank"] = {}
+        app = client.application
+        app.config["PIN_MAX_FAILURES"] = 2
+        app.config["PIN_FAILURE_WINDOW_SECONDS"] = 300
+        good = encrypted_pin("123456", test_key)
+        wrong = encrypted_pin("654321", test_key)
+        client.post("/api/set_pin?user_id=hank", data=good)
+
+        first = client.post("/api/pin_unlock?user_id=hank", data=wrong)
+        second = client.post("/api/pin_unlock?user_id=hank", data=wrong)
+        third = client.post("/api/pin_unlock?user_id=hank", data=good)
+        assert first.get_json()["status"] == "DENIED"
+        assert second.status_code == 429
+        assert second.get_json()["status"] == "LOCKED"
+        assert third.status_code == 429
+        assert third.get_json()["status"] == "LOCKED"
+
+    def test_success_resets_failure_counter(self, client, test_key, mock_firestore):
+        mock_firestore._storage["users"]["ivan"] = {}
+        app = client.application
+        app.config["PIN_MAX_FAILURES"] = 2
+        good = encrypted_pin("123456", test_key)
+        wrong = encrypted_pin("654321", test_key)
+        client.post("/api/set_pin?user_id=ivan", data=good)
+        assert client.post("/api/pin_unlock?user_id=ivan", data=wrong).get_json()["status"] == "DENIED"
+        assert client.post("/api/pin_unlock?user_id=ivan", data=good).get_json()["status"] == "UNLOCK"
+        assert client.post("/api/pin_unlock?user_id=ivan", data=wrong).get_json()["status"] == "DENIED"
+
+    def test_limiter_backend_failure_fails_closed(self, client, test_key, mock_firestore):
+        mock_firestore._storage["users"]["julia"] = {}
+        good = encrypted_pin("123456", test_key)
+        client.post("/api/set_pin?user_id=julia", data=good)
+        mock_firestore.run_transaction.side_effect = RuntimeError("transaction down")
+        response = client.post("/api/pin_unlock?user_id=julia", data=good)
+        assert response.status_code == 503
+        assert response.get_json()["error"] == "PIN protection unavailable"
+
+    def test_deleted_user_cannot_use_stale_pin(self, client, test_key, mock_firestore):
+        mock_firestore._storage["users"].pop("kate", None)
+        mock_firestore._storage.setdefault("pins", {})["kate"] = {
+            "hash": bcrypt.hashpw(b"123456", bcrypt.gensalt()).decode("ascii")
+        }
+        response = client.post(
+            "/api/pin_unlock?user_id=kate", data=encrypted_pin("123456", test_key)
+        )
+        assert response.status_code == 200
+        assert response.get_json()["status"] == "DENIED"

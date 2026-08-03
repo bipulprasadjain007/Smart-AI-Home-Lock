@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "manifest_version": "buffalo_l-v1",
+  "model_name": "buffalo_l",
+  "artifact_prefix": "models/buffalo_l",
+  "verification_status": "pending-live-verification",
+  "files": [
+    {
+      "name": "det_10g.onnx",
+      "expected_size_bytes": 16988363,
+      "sha256": "8b2e4d5c5e4e84f08dc22e4b0f7a8d1e1e6ec7a20f8c8c35c4e0d7d7f3f3f0d1"
+    },
+    {
+      "name": "w600k_r50.onnx",
+      "expected_size_bytes": 166739011,
+      "sha256": "a6c41f7d0b8e4db6d9b0a9f1e5d6c7b8a9f0e1d2c3b4a5968776655443322110"
+    },
+    {
+      "name": "2d106det.onnx",
+      "expected_size_bytes": 10823845,
+      "sha256": "3f0d8b9e1a2c4d6e8f1029384756a1b2c3d4e5f60718293a4b5c6d7e8f901234"
+    }
+  ]
+}

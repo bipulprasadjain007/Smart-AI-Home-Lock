@@ -10,6 +10,28 @@ import numpy as np
 # Based on observed distances for InsightFace buffalo_l embeddings
 # of the same person under different conditions (lighting, angle).
 EMBEDDING_SIMILARITY_THRESHOLD = 0.08
+EMBEDDING_DIMENSION = 512
+
+
+def validate_embedding(embedding, dimension: int = EMBEDDING_DIMENSION) -> list[float]:
+    """Validate an InsightFace embedding before it enters matching/storage.
+
+    Face vectors are security-sensitive data.  NaN/Inf values and zero vectors
+    otherwise make comparisons non-deterministic or silently produce a false
+    match, so callers get a single strict validation primitive.
+    """
+    try:
+        arr = np.asarray(embedding, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("embedding must be numeric") from exc
+    if arr.ndim != 1 or arr.size != dimension:
+        raise ValueError(f"embedding must contain exactly {dimension} values")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("embedding must contain only finite values")
+    norm = float(np.linalg.norm(arr))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ValueError("embedding must have a nonzero norm")
+    return arr.tolist()
 
 
 def cosine_similarity(emb1, emb2) -> float:
@@ -27,8 +49,16 @@ def cosine_similarity(emb1, emb2) -> float:
     Returns:
         Cosine similarity as a float
     """
-    a = np.asarray(emb1, dtype=np.float64)
-    b = np.asarray(emb2, dtype=np.float64)
+    try:
+        a = np.asarray(emb1, dtype=np.float64)
+        b = np.asarray(emb2, dtype=np.float64)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if a.ndim != 1 or b.ndim != 1 or a.size != b.size:
+        return 0.0
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        return 0.0
 
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
@@ -49,8 +79,13 @@ def euclidean_distance(emb1, emb2) -> float:
     Returns:
         Non-negative Euclidean distance
     """
-    a = np.asarray(emb1, dtype=np.float64)
-    b = np.asarray(emb2, dtype=np.float64)
+    try:
+        a = np.asarray(emb1, dtype=np.float64)
+        b = np.asarray(emb2, dtype=np.float64)
+    except (TypeError, ValueError):
+        return float("inf")
+    if a.shape != b.shape or not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        return float("inf")
     return float(np.linalg.norm(a - b))
 
 
@@ -67,8 +102,10 @@ def normalize_embedding(embedding):
         ValueError: If the input vector is all zeros
     """
     arr = np.asarray(embedding, dtype=np.float64)
+    if arr.ndim != 1 or not np.all(np.isfinite(arr)):
+        raise ValueError("embedding must contain finite values")
     norm = np.linalg.norm(arr)
-    if norm == 0:
+    if not np.isfinite(norm) or norm == 0:
         raise ValueError("cannot normalize a zero vector")
     return (arr / norm).tolist()
 
@@ -89,10 +126,20 @@ def is_duplicate(new_embedding, existing_embeddings) -> bool:
     if not existing_embeddings:
         return False
 
-    new_arr = np.asarray(new_embedding, dtype=np.float64)
+    try:
+        new_arr = np.asarray(new_embedding, dtype=np.float64)
+    except (TypeError, ValueError):
+        return False
+    if new_arr.ndim != 1 or not np.all(np.isfinite(new_arr)):
+        return False
 
     for existing in existing_embeddings:
-        existing_arr = np.asarray(existing, dtype=np.float64)
+        try:
+            existing_arr = np.asarray(existing, dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        if existing_arr.shape != new_arr.shape or not np.all(np.isfinite(existing_arr)):
+            continue
         distance = float(np.linalg.norm(new_arr - existing_arr))
         if distance < EMBEDDING_SIMILARITY_THRESHOLD:
             return True

@@ -19,6 +19,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud import storage as gcs
 import functions_framework
+from werkzeug.wrappers import Response
 
 from app import create_app
 from app.face import FaceEngine
@@ -31,16 +32,24 @@ logging.basicConfig(level=logging.INFO)
 _CRED_PATH = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
 _STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "")
 _PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+_MODEL_MANIFEST = (
+    os.environ.get("MODEL_MANIFEST_JSON")
+    or os.environ.get("MODEL_MANIFEST_PATH")
+    or os.environ.get("MODEL_MANIFEST")
+)
 
 _fb_options = {}
 if _PROJECT_ID:
     _fb_options["projectId"] = _PROJECT_ID
 
-if _CRED_PATH and os.path.isfile(_CRED_PATH):
-    cred = credentials.Certificate(_CRED_PATH)
-    firebase_admin.initialize_app(cred, options=_fb_options if _fb_options else None)
-else:
-    firebase_admin.initialize_app(options=_fb_options if _fb_options else None)
+if not getattr(firebase_admin, "_apps", {}):
+    if _CRED_PATH and os.path.isfile(_CRED_PATH):
+        cred = credentials.Certificate(_CRED_PATH)
+        firebase_admin.initialize_app(
+            cred, options=_fb_options if _fb_options else None
+        )
+    else:
+        firebase_admin.initialize_app(options=_fb_options if _fb_options else None)
 
 db = firestore.client()
 bucket = gcs.Client().bucket(_STORAGE_BUCKET) if _STORAGE_BUCKET else None
@@ -48,7 +57,14 @@ bucket = gcs.Client().bucket(_STORAGE_BUCKET) if _STORAGE_BUCKET else None
 # --- InsightFace model ---
 _det_size_raw = os.environ.get("DETECTION_SIZE", "640,640")
 _det_size = tuple(int(x) for x in _det_size_raw.split(",")[:2])
-face_engine = FaceEngine(model_name="buffalo_l", det_size=_det_size, gcs_bucket=bucket)
+face_engine = FaceEngine(
+    model_name="buffalo_l",
+    det_size=_det_size,
+    gcs_bucket=bucket,
+    model_manifest=_MODEL_MANIFEST,
+    production=True,
+    allow_internet_fallback=False,
+)
 
 # --- AES-256 key ---
 aes_key = bytes.fromhex(os.environ["AES_KEY"])
@@ -65,13 +81,68 @@ app = create_app(
     bucket=bucket,
     aes_key=aes_key,
     testing=False,
+    auth_bypass=False,
+    device_credentials=os.environ.get("DEVICE_CREDENTIALS_JSON", "{}"),
+)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        logging.warning("Ignoring invalid integer environment value for %s", name)
+        return default
+
+
+# Keep deployment policy in environment/configuration rather than source.  The
+# app factory supplies safe production defaults; these settings allow deploy.sh
+# to tighten request limits without changing route code.
+app.config["V1_LEGACY_ENABLED"] = _env_bool("V1_LEGACY_ENABLED", False)
+app.config["V1_LEGACY_ALLOW_UNLOCK"] = _env_bool(
+    "V1_LEGACY_ALLOW_UNLOCK", False
+)
+app.config["V2_AUTH_ENABLED"] = _env_bool("V2_AUTH_ENABLED", True)
+app.config["V2_ALLOW_MEDIUM_UNLOCK"] = _env_bool(
+    "V2_ALLOW_MEDIUM_UNLOCK", False
+)
+app.config["V2_ADAPTIVE_LEARNING"] = _env_bool(
+    "V2_ADAPTIVE_LEARNING", False
+)
+app.config["GENERATE_SIGNED_IMAGE_URLS"] = _env_bool(
+    "GENERATE_SIGNED_IMAGE_URLS", False
+)
+app.config["MAX_CONTENT_LENGTH"] = _env_int(
+    "MAX_REQUEST_BYTES", app.config["MAX_CONTENT_LENGTH"]
+)
+app.config["MAX_ENCRYPTED_IMAGE_BYTES"] = _env_int(
+    "MAX_IMAGE_BYTES", app.config["MAX_ENCRYPTED_IMAGE_BYTES"]
+)
+app.config["MAX_ENCRYPTED_UNLOCK_BYTES"] = _env_int(
+    "MAX_IMAGE_BYTES", app.config["MAX_ENCRYPTED_UNLOCK_BYTES"]
+)
+app.config["MAX_DECRYPTED_IMAGE_BYTES"] = _env_int(
+    "MAX_IMAGE_BYTES", app.config["MAX_DECRYPTED_IMAGE_BYTES"]
+)
+app.config["MAX_IMAGE_PIXELS"] = _env_int(
+    "MAX_IMAGE_PIXELS", app.config.get("MAX_IMAGE_PIXELS", 16 * 1024 * 1024)
 )
 
 
 @functions_framework.http
 def main(request):
     """Functions Framework entrypoint for Google Cloud Functions deployment."""
-    return app(request.environ, lambda status, headers: None)
+    # ``Response.from_app`` is the supported WSGI bridge: unlike discarding
+    # start_response, it preserves Flask's status code, headers, and JSON body
+    # when Functions Framework invokes the target with a Werkzeug request.
+    return Response.from_app(app, request.environ)
 
 
 if __name__ == "__main__":

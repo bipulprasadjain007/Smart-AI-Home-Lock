@@ -1,0 +1,11 @@
+{
+  "description": "Non-production v2 signing and body-layout fixture",
+  "device_id": "cam-test-01",
+  "timestamp": "1700000000",
+  "request_nonce": "00112233445566778899aabbccddeeff",
+  "hmac_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "body_hex": "000102030405060708090a0b101112131415161718191a1b1c1d1e1f746573742d6a706567",
+  "body_sha256": "b68e18bc83f6737a96f5053f0ceb9719959ae0b494894598e2c280c35fee685a",
+  "canonical": "SAHL-V2\nPOST\n/api/unlock\n\ncam-test-01\n1700000000\n00112233445566778899aabbccddeeff\nb68e18bc83f6737a96f5053f0ceb9719959ae0b494894598e2c280c35fee685a",
+  "signature": "cbcdd277799b1d49129a329ca3ea31e2aa17e0f4241985de4277db6b8a4102e7"
+}

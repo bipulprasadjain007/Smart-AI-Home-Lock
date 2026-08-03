@@ -1,13 +1,19 @@
-functions-framework==3.*
+# Direct runtime pins tested in the repository's Python 3.12 environment.
+# Keep NumPy below 2.0: ONNX Runtime 1.18.1 and InsightFace 0.7.3 use the
+# NumPy 1.x ABI.
+functions-framework==3.8.0
 insightface==0.7.3
 onnxruntime==1.18.1
-firebase-admin>=6.0.0
+onnx==1.18.0
+numpy==1.26.4
+opencv-python==4.9.0.80
+scipy==1.16.0
+firebase-admin==6.4.0
+google-cloud-firestore==2.21.0
+google-cloud-storage==3.1.1
 pycryptodome==3.20.0
 bcrypt==4.1.2
-flask>=2.3.0
-gunicorn>=21.2.0
-numpy==1.26.4
-opencv-python>=4.9.0
-python-dotenv>=1.0.0
-google-cloud-storage>=2.0.0
-Flask-Limiter>=3.0.0
+Flask==2.3.3
+gunicorn==21.2.0
+python-dotenv==1.1.1
+Flask-Limiter==3.8.0

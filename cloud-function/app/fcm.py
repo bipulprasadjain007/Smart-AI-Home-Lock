@@ -11,6 +11,7 @@ import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+FCM_MAX_MULTICAST_TOKENS = 500
 
 
 # ── Token Management ──────────────────────────────────────────────────────
@@ -209,27 +210,39 @@ def send_unlock_notification(
         logger.debug("No active FCM tokens for user=%s", user_id)
         return {"success": 0, "failure": 0, "cleaned": 0}
 
-    multicast = build_unlock_multicast(
-        tokens=tokens,
-        user_id=user_id,
-        confidence=confidence,
-        similarity=similarity,
-        method=method,
-        image_url=image_url,
-    )
-
-    try:
-        response = messaging.send_each_for_multicast(multicast)
-    except Exception as e:
-        logger.error("FCM multicast send failed: %s", e)
-        return {"success": 0, "failure": len(tokens), "cleaned": 0}
-
-    # Clean up invalid tokens
+    # FCM rejects a multicast with more than 500 registration tokens.  Keep
+    # each request bounded and aggregate the per-chunk response.
+    success_count = 0
+    failure_count = 0
     cleaned = 0
-    for i, send_response in enumerate(response.responses):
-        if not send_response.success:
-            exception = send_response.exception
-            bad_token = tokens[i]
+    for start in range(0, len(tokens), FCM_MAX_MULTICAST_TOKENS):
+        chunk = tokens[start:start + FCM_MAX_MULTICAST_TOKENS]
+        multicast = build_unlock_multicast(
+            tokens=chunk,
+            user_id=user_id,
+            confidence=confidence,
+            similarity=similarity,
+            method=method,
+            image_url=image_url,
+        )
+
+        try:
+            response = messaging.send_each_for_multicast(multicast)
+        except Exception as e:
+            logger.error("FCM multicast send failed for chunk: %s", e)
+            failure_count += len(chunk)
+            continue
+
+        success_count += int(getattr(response, "success_count", 0) or 0)
+        failure_count += int(getattr(response, "failure_count", 0) or 0)
+
+        # Clean up invalid tokens.  Response ordering is guaranteed to match
+        # the chunk ordering, not the complete token list.
+        for i, send_response in enumerate(getattr(response, "responses", ())):
+            if getattr(send_response, "success", False):
+                continue
+            exception = getattr(send_response, "exception", None)
+            bad_token = chunk[i] if i < len(chunk) else ""
 
             should_delete = (
                 isinstance(exception, messaging.UnregisteredError)
@@ -255,11 +268,11 @@ def send_unlock_notification(
 
     logger.info(
         "FCM: %d sent, %d failed, %d tokens cleaned for user=%s",
-        response.success_count, response.failure_count, cleaned, user_id,
+        success_count, failure_count, cleaned, user_id,
     )
 
     return {
-        "success": response.success_count,
-        "failure": response.failure_count,
+        "success": success_count,
+        "failure": failure_count,
         "cleaned": cleaned,
     }
