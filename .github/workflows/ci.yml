@@ -55,3 +55,32 @@ jobs:
         run: pio run -d esp32-firmware -e ai-thinker-esp32-cam
       - name: Build production firmware
         run: pio run -d esp32-firmware -e ai-thinker-esp32-cam-production
+
+  flutter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: flutter-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Create native platform projects
+        run: bash tool/bootstrap_platforms.sh
+      - name: Install Flutter dependencies
+        run: flutter pub get
+      - name: Analyze Flutter source
+        run: flutter analyze
+      - name: Run Flutter tests
+        run: flutter test
+      - name: Build debug Android application
+        run: >-
+          flutter build apk --debug
+          --dart-define=API_BASE_URL=https://example.invalid
+          --dart-define=FIREBASE_API_KEY=test-api-key
+          --dart-define=FIREBASE_APP_ID=1:1:android:test
+          --dart-define=FIREBASE_MESSAGING_SENDER_ID=1
+          --dart-define=FIREBASE_PROJECT_ID=test-project

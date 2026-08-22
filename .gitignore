@@ -21,6 +21,13 @@ build/
 .pytest_cache/
 **/.pio/
 cloud-function/tools/model-manifest.json
+flutter-app/.dart_tool/
+flutter-app/.flutter-plugins*
+flutter-app/build/
+flutter-app/android/
+flutter-app/ios/
+flutter-app/android/local.properties
+flutter-app/ios/Flutter/ephemeral/
 
 # Dataset (50K files, 398MB — not part of runtime)
 archive/

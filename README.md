@@ -11,6 +11,8 @@ administrator token.
   preflight, model-manifest verification, and the automated test suite.
 - `esp32-firmware/` contains the pinned PlatformIO firmware, host protocol
   checks, and an on-device AES-GCM test vector.
+- `flutter-app/` contains the Firebase-authenticated Android/iOS administrator
+  client for enrollment, PIN management, notifications, and access logs.
 - `docs/deployment.md` contains the production and local deployment procedure.
 - Root `main.py` is a migration guard. Root `pin.py` is a local encrypted-packet
   helper; neither is the production service entrypoint.
@@ -45,6 +47,8 @@ python3 esp32-firmware/tools/test_firmware_static.py
 python3 -m compileall -q cloud-function main.py pin.py esp32-firmware/tools
 bash -n cloud-function/deploy.sh cloud-function/tools/verify_infrastructure.sh
 ```
+
+Flutter validation is documented in `flutter-app/README.md` and runs in CI.
 
 Build both firmware policies with PlatformIO:
 

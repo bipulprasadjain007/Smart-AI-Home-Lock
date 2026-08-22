@@ -3,6 +3,7 @@
 All service boundaries are injected or patched; these tests do not contact GCP.
 """
 
+import io
 import json
 import time
 from datetime import datetime, timezone
@@ -385,6 +386,79 @@ def test_set_pin_requires_existing_user_when_enabled(
     users.document.return_value.get.return_value = present_snapshot
     response = client.post("/api/set_pin?user_id=present", data=encrypted)
     assert response.status_code == 200
+
+
+def _tls_registration_data(image_bytes):
+    return {
+        "user_id": "mobile_user",
+        **{
+            f"image{index}": (io.BytesIO(image_bytes), f"image{index}.jpg")
+            for index in range(1, 6)
+        },
+    }
+
+
+def test_admin_tls_payload_supports_mobile_enrollment(
+    client, sample_plaintext_jpeg, mock_firestore
+):
+    response = client.post(
+        "/api/register",
+        data=_tls_registration_data(sample_plaintext_jpeg),
+        content_type="multipart/form-data",
+        headers={"X-Admin-Payload-Protection": "tls"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["user_id"] == "mobile_user"
+    assert "mobile_user" in mock_firestore._storage["users"]
+
+
+def test_admin_tls_payload_supports_mobile_pin_setup(client):
+    response = client.post(
+        "/api/set_pin?user_id=mobile_user",
+        data=b"123456",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-Admin-Payload-Protection": "tls",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "PIN set"
+
+
+def test_admin_tls_payload_rejects_insecure_transport(
+    app, client, sample_plaintext_jpeg
+):
+    app.config["ADMIN_TLS_REQUIRE_HTTPS"] = True
+    response = client.post(
+        "/api/register",
+        data=_tls_registration_data(sample_plaintext_jpeg),
+        content_type="multipart/form-data",
+        headers={"X-Admin-Payload-Protection": "tls"},
+        base_url="http://localhost",
+    )
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "secure transport required"
+
+    response = client.post(
+        "/api/register",
+        data=_tls_registration_data(sample_plaintext_jpeg),
+        content_type="multipart/form-data",
+        headers={"X-Admin-Payload-Protection": "tls"},
+        base_url="https://localhost",
+    )
+    assert response.status_code == 200
+
+
+def test_admin_payload_rejects_unknown_protection(client):
+    response = client.post(
+        "/api/set_pin?user_id=mobile_user",
+        data=b"123456",
+        headers={"X-Admin-Payload-Protection": "unknown"},
+    )
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "unsupported admin payload protection"
 
 
 def test_datetime_log_cursor_is_json_safe_and_stable(app, client, mock_firestore):

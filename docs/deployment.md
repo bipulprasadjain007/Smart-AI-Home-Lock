@@ -24,6 +24,8 @@ V1_LEGACY_ENABLED=false
 V1_LEGACY_ALLOW_UNLOCK=false
 V2_ALLOW_MEDIUM_UNLOCK=false
 V2_ADAPTIVE_LEARNING=false
+ADMIN_TLS_PAYLOAD_ENABLED=true
+ADMIN_TLS_REQUIRE_HTTPS=true
 MAX_REQUEST_BYTES=12582912
 MAX_IMAGE_BYTES=2097152
 MAX_IMAGE_PIXELS=16777216
@@ -37,6 +39,13 @@ credential. Firmware must complete this exchange before sending an unlock.
 The Cloud Function runtime identity must have Secret Manager Secret Accessor
 permission on both secrets. Do not add either secret to `--set-env-vars`, a
 source archive, or a committed `.env` file.
+
+The Flutter administrator app uses Firebase bearer authentication and HTTPS
+for enrollment photos and PIN setup. It sends
+`X-Admin-Payload-Protection: tls`; the production service rejects this mode on
+insecure transport. This avoids placing the server/device AES key in a mobile
+application. ESP32 unlock and PIN-unlock requests still require AES-GCM plus
+the complete protocol-v2 HMAC envelope.
 
 ## Verified model manifest
 

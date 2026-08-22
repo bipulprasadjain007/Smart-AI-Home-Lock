@@ -82,6 +82,11 @@ def create_app(
     app.config["MAX_DECRYPTED_PIN_BYTES"] = 64
     app.config["LEGACY_NUMERIC_LOG_CURSOR"] = bool(testing)
     app.config["GENERATE_SIGNED_IMAGE_URLS"] = False
+    # Administrative clients authenticate with a Firebase admin ID token and
+    # use HTTPS for transport confidentiality. They must never receive the
+    # server/device AES key used by actuator traffic.
+    app.config["ADMIN_TLS_PAYLOAD_ENABLED"] = True
+    app.config["ADMIN_TLS_REQUIRE_HTTPS"] = not bool(testing)
 
     try:
         app.config["DEVICE_CREDENTIALS"] = parse_device_credentials(

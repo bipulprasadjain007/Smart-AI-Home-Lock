@@ -1,0 +1,15 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    avoid_print: error
+    missing_required_param: error
+    missing_return: error
+  exclude:
+    - build/**
+
+linter:
+  rules:
+    avoid_dynamic_calls: true
+    cancel_subscriptions: true
+    close_sinks: true

@@ -119,6 +119,12 @@ app.config["V2_ADAPTIVE_LEARNING"] = _env_bool(
 app.config["GENERATE_SIGNED_IMAGE_URLS"] = _env_bool(
     "GENERATE_SIGNED_IMAGE_URLS", False
 )
+app.config["ADMIN_TLS_PAYLOAD_ENABLED"] = _env_bool(
+    "ADMIN_TLS_PAYLOAD_ENABLED", True
+)
+app.config["ADMIN_TLS_REQUIRE_HTTPS"] = _env_bool(
+    "ADMIN_TLS_REQUIRE_HTTPS", True
+)
 app.config["MAX_CONTENT_LENGTH"] = _env_int(
     "MAX_REQUEST_BYTES", app.config["MAX_CONTENT_LENGTH"]
 )

@@ -82,6 +82,9 @@ LEGACY_MARKER_ALIASES = (LEGACY_MARKER_HEADER, "X-Legacy")
 MAX_DEVICE_TOKEN_BYTES = 4096
 MAX_DEVICE_NAME_LENGTH = 200
 SUPPORTED_DEVICE_PLATFORMS = frozenset({"android", "ios", "web"})
+ADMIN_PAYLOAD_HEADER = "X-Admin-Payload-Protection"
+ADMIN_PAYLOAD_AES_GCM = "aes-256-gcm"
+ADMIN_PAYLOAD_TLS = "tls"
 
 
 class RequestInputError(ValueError):
@@ -521,6 +524,45 @@ def _request_body(limit_name: str) -> bytes:
     return body
 
 
+def _request_is_https() -> bool:
+    if request.is_secure:
+        return True
+    forwarded = request.headers.get("X-Forwarded-Proto", "")
+    return forwarded.split(",", 1)[0].strip().lower() == "https"
+
+
+def _admin_payload(
+    payload: bytes,
+    key: bytes,
+    encrypted_limit_name: str,
+    plaintext_limit_name: str,
+) -> bytes:
+    """Decode an admin payload without exposing the shared device AES key.
+
+    Existing administrative clients remain AES-GCM compatible. Mobile clients
+    select TLS protection explicitly after Firebase admin authentication.
+    """
+
+    protection = request.headers.get(ADMIN_PAYLOAD_HEADER, ADMIN_PAYLOAD_AES_GCM)
+    if protection == ADMIN_PAYLOAD_AES_GCM:
+        return _decrypt_packet(
+            payload,
+            key,
+            encrypted_limit_name,
+            plaintext_limit_name,
+        )
+    if protection != ADMIN_PAYLOAD_TLS:
+        raise RequestInputError("unsupported admin payload protection")
+    if not _config_bool("ADMIN_TLS_PAYLOAD_ENABLED", True):
+        raise RequestInputError("TLS admin payloads are disabled")
+    if _config_bool("ADMIN_TLS_REQUIRE_HTTPS", True) and not _request_is_https():
+        raise RequestInputError("secure transport required")
+    plaintext_limit = _config_int(plaintext_limit_name, 2 * 1024 * 1024, minimum=1)
+    if len(payload) > plaintext_limit:
+        raise RequestLimitError("request too large")
+    return payload
+
+
 def _decrypt_packet(
     packet: bytes,
     key: bytes,
@@ -789,7 +831,7 @@ def register():
                 file.stream,
                 _config_int("MAX_ENCRYPTED_IMAGE_BYTES", 2 * 1024 * 1024, minimum=1),
             )
-            decrypted = _decrypt_packet(
+            decrypted = _admin_payload(
                 encrypted_data,
                 key,
                 "MAX_ENCRYPTED_IMAGE_BYTES",
@@ -1191,7 +1233,7 @@ def set_pin():
         _require_admin()
         user_id = _validate_user_id(request.args.get("user_id", ""))
         encrypted_data = _request_body("MAX_ENCRYPTED_PIN_BYTES")
-        plaintext = _decrypt_packet(
+        plaintext = _admin_payload(
             encrypted_data,
             current_app.config["AES_KEY"],
             "MAX_ENCRYPTED_PIN_BYTES",

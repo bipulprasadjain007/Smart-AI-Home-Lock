@@ -34,6 +34,8 @@ V2_ENV_DEFAULTS = {
     "V1_LEGACY_ALLOW_UNLOCK": "false",
     "V2_ALLOW_MEDIUM_UNLOCK": "false",
     "V2_ADAPTIVE_LEARNING": "false",
+    "ADMIN_TLS_PAYLOAD_ENABLED": "true",
+    "ADMIN_TLS_REQUIRE_HTTPS": "true",
 }
 
 
