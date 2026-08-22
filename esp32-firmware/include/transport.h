@@ -30,6 +30,15 @@ struct HealthTransportResult {
   String error;
 };
 
+struct TimeTransportResult {
+  RequestState state = RequestState::NotSent;
+  bool tlsSucceeded = false;
+  int httpStatus = 0;
+  bool authenticated = false;
+  uint64_t serverTime = 0;
+  String error;
+};
+
 class Transport {
  public:
   bool ensureWifi(const DeviceConfig &config,
@@ -44,6 +53,9 @@ class Transport {
 
   HealthTransportResult getHealth(const DeviceConfig &config,
                                   const Protocol::SignedHeaders &headers);
+
+  TimeTransportResult getAuthenticatedTime(
+      const DeviceConfig &config, const Protocol::TimeHeaders &headers);
 
  private:
   String urlFor(const DeviceConfig &config, const char *path) const;

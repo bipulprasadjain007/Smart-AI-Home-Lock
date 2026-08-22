@@ -1,7 +1,7 @@
 # ESP32-CAM firmware lane
 
 This is the Day 5-6 firmware lane for an AI Thinker ESP32-CAM. It is a
-PlatformIO Arduino project pinned to `espressif32@6.9.0` (Arduino-ESP32 3.0.7)
+PlatformIO Arduino project pinned to `espressif32@6.9.0` (Arduino-ESP32 2.0.17)
 and uses only the ESP32 core's bundled mbedTLS for cryptography.
 
 ## Hardware and wiring
@@ -107,14 +107,20 @@ HTTP, and NTP waits are finite. Wi-Fi reconnect uses bounded backoff. A
 negative result from the single unlock POST is treated as an uncertain packet
 and is never retried automatically.
 
-The current time bootstrap is unauthenticated SNTP. Therefore any build with
-`SAHL_PRODUCTION=1` is intentionally rejected at compile time until an
-approved authenticated or multi-source time-trust implementation exists.
-Do not deploy the development build as production or treat a valid SNTP clock
-as an authenticated security signal. A future production build must also pass
-the `SAHL_REQUIRE_FLASH_ENCRYPTION=1` runtime flash-encryption gate or provide
-an approved secure-element integration; ordinary NVS is never represented as
-production secret storage.
+Time establishment has two fail-closed stages. SNTP provides only a rough
+clock so the provisioned CA certificate can be evaluated. The firmware then
+sends a fresh random challenge to `/api/device_time` over validated TLS. The
+cloud service verifies a device HMAC and returns the server timestamp in
+challenge-bound HMAC response headers. The firmware verifies that response in
+constant time, applies the authenticated timestamp, and refreshes it hourly.
+SNTP alone never enables an unlock.
+
+Production builds require both `SAHL_REQUIRE_AUTHENTICATED_TIME=1` and
+`SAHL_REQUIRE_FLASH_ENCRYPTION=1`. They also fail at runtime unless ESP32 flash
+encryption is enabled, so ordinary unencrypted NVS is never represented as
+production secret storage. Flash encryption is an irreversible device
+provisioning operation; follow Espressif's release-mode procedure and verify
+the eFuse state before installing production credentials.
 
 The relay is pulsed only when all of these are true: TLS completed, HTTP status
 is exactly 200, the bounded body is valid JSON, `protocol_version` is exactly
@@ -134,16 +140,16 @@ fails closed through reset.
 
 ```bash
 pio run -d esp32-firmware
+pio run -d esp32-firmware -e ai-thinker-esp32-cam-production
 pio device monitor -d esp32-firmware
 ```
 
 `tools/test_protocol_vectors.py` is a host-only standard-library check of the
-canonical request, lowercase HMAC, and `nonce || tag || ciphertext` envelope
-shape. PlatformIO and an attached ESP32-CAM/relay were unavailable during
-implementation, so no hardware, camera, TLS, relay, or cloud integration
-validation is claimed. The firmware source/API is kept aligned with the
-pinned Arduino-ESP32 3.x APIs and the host golden vector can be run without
-PlatformIO:
+unlock and authenticated-time canonical requests, lowercase HMACs, and the
+`nonce || tag || ciphertext` envelope shape. Hardware validation still
+requires an attached ESP32-CAM and relay. The firmware source/API is kept
+aligned with the pinned Arduino-ESP32 3.x APIs and the host golden vectors can
+be run without PlatformIO:
 
 ```bash
 python3 esp32-firmware/tools/test_protocol_vectors.py

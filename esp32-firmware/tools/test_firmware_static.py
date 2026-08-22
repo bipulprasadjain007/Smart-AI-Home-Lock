@@ -52,14 +52,23 @@ def main() -> None:
 
     assert "#define SAHL_PRODUCTION 0" in config_h
     assert "SAHL_REQUIRE_FLASH_ENCRYPTION" in config_h
-    assert "SAHL_PRODUCTION is blocked until authenticated time trust" in config_h
+    assert "SAHL_PRODUCTION requires SAHL_REQUIRE_AUTHENTICATED_TIME=1" in config_h
+    assert 'kDeviceTimePath = "/api/device_time"' in config_h
+    assert "establishAuthenticatedTime(config)" in main_cpp
+    assert "Device-authenticated time established" in main_cpp
+    assert "getAuthenticatedTime" in (
+        ROOT / "src" / "transport.cpp"
+    ).read_text(encoding="utf-8")
     assert "esp_flash_encryption_enabled()" in config_cpp
     assert "if (!secureStorageReady())" in config_cpp
     assert "NVS-only secrets are not production protection" in config_cpp
     assert "SAHL_PRODUCTION=0" in platformio
+    assert "ai-thinker-esp32-cam-production" in platformio
+    assert "SAHL_PRODUCTION=1" in platformio
     assert "SAHL_REQUIRE_FLASH_ENCRYPTION=1" in platformio
-    assert "test_build_project_src = no" in platformio
-    assert "unauthenticated SNTP" in readme
+    assert "SAHL_REQUIRE_AUTHENTICATED_TIME=1" in platformio
+    assert "test_build_src = no" in platformio
+    assert "authenticated timestamp" in readme
     assert "NVS alone is not production secret" in readme
 
     assert "#include <mbedtls/gcm.h>" in crypto_test

@@ -14,6 +14,31 @@ bool isSafeHeaderValue(const String &value) {
          value.indexOf('\n') < 0;
 }
 
+bool isLowerHex(const String &value, size_t length) {
+  if (value.length() != length) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool constantTimeEqual(const String &left, const std::string &right) {
+  if (left.length() != right.length()) {
+    return false;
+  }
+  uint8_t difference = 0;
+  for (size_t i = 0; i < right.length(); ++i) {
+    difference |= static_cast<uint8_t>(left[i]) ^
+                  static_cast<uint8_t>(right[i]);
+  }
+  return difference == 0;
+}
+
 std::string decimal(uint64_t value) {
   char buffer[21] = {};
   snprintf(buffer, sizeof(buffer), "%llu",
@@ -428,6 +453,87 @@ bool buildHealthHeaders(const String &deviceId, uint64_t timestamp,
   static const uint8_t emptyBody = 0;
   return buildSignedHeaders("GET", kHealthPath, deviceId, timestamp, hmacKey,
                             &emptyBody, 0, headers, error);
+}
+
+std::string canonicalTimeRequest(const char *deviceId,
+                                 const char *requestNonceHex) {
+  std::string result = "SAHL-TIME-V1\nGET\n";
+  result += kDeviceTimePath;
+  result += '\n';
+  result += deviceId;
+  result += '\n';
+  result += requestNonceHex;
+  return result;
+}
+
+std::string canonicalTimeResponse(const char *deviceId,
+                                  const char *requestNonceHex,
+                                  uint64_t serverTimestamp) {
+  std::string result = "SAHL-TIME-V1\nRESPONSE\n";
+  result += deviceId;
+  result += '\n';
+  result += requestNonceHex;
+  result += '\n';
+  result += decimal(serverTimestamp);
+  return result;
+}
+
+bool buildTimeHeaders(const String &deviceId,
+                      const uint8_t hmacKey[kHmacKeyBytes],
+                      TimeHeaders &headers, std::string &error) {
+  error.clear();
+  if (!isSafeHeaderValue(deviceId) || hmacKey == nullptr) {
+    error = "invalid time signing input";
+    return false;
+  }
+
+  uint8_t nonce[kRequestNonceBytes] = {};
+  Crypto::randomBytes(nonce, sizeof(nonce));
+  const std::string nonceHex = Crypto::hexEncode(nonce, sizeof(nonce));
+  if (nonceHex.length() != kRequestNonceHexChars) {
+    error = "unable to create time challenge";
+    return false;
+  }
+  const std::string canonical =
+      canonicalTimeRequest(deviceId.c_str(), nonceHex.c_str());
+  const std::string signature =
+      Crypto::hmacSha256Hex(hmacKey, kHmacKeyBytes, canonical);
+  if (signature.length() != 64) {
+    error = "unable to sign time challenge";
+    return false;
+  }
+
+  headers.protocolVersion = "1";
+  headers.deviceId = deviceId;
+  headers.requestNonce = nonceHex.c_str();
+  headers.requestSignature = signature.c_str();
+  return true;
+}
+
+bool verifyTimeResponse(const String &deviceId,
+                        const TimeHeaders &requestHeaders,
+                        uint64_t serverTimestamp,
+                        const String &responseNonce,
+                        const String &responseSignature,
+                        const uint8_t hmacKey[kHmacKeyBytes],
+                        std::string &error) {
+  error.clear();
+  if (hmacKey == nullptr || serverTimestamp < kMinimumValidUnixTime ||
+      responseNonce != requestHeaders.requestNonce ||
+      !isLowerHex(responseNonce, kRequestNonceHexChars) ||
+      !isLowerHex(responseSignature, 64)) {
+    error = "invalid authenticated-time response";
+    return false;
+  }
+  const std::string canonical = canonicalTimeResponse(
+      deviceId.c_str(), responseNonce.c_str(), serverTimestamp);
+  const std::string expected =
+      Crypto::hmacSha256Hex(hmacKey, kHmacKeyBytes, canonical);
+  if (!constantTimeEqual(responseSignature, expected)) {
+    error = "authenticated-time signature rejected";
+    return false;
+  }
+  return true;
 }
 
 bool parseUnlockResponse(const String &json, UnlockResponse &response,

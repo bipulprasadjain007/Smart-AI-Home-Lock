@@ -21,6 +21,13 @@ struct UnlockResponse {
   String status;
 };
 
+struct TimeHeaders {
+  String protocolVersion;
+  String deviceId;
+  String requestNonce;
+  String requestSignature;
+};
+
 // Pure formatting helper. It is independent of HTTP so its exact newline
 // layout can be checked with the host-side golden vector.
 std::string canonicalRequest(const char *method, const char *path,
@@ -36,6 +43,24 @@ bool buildUnlockHeaders(const String &deviceId, uint64_t timestamp,
 bool buildHealthHeaders(const String &deviceId, uint64_t timestamp,
                         const uint8_t hmacKey[kHmacKeyBytes],
                         SignedHeaders &headers, std::string &error);
+
+std::string canonicalTimeRequest(const char *deviceId,
+                                 const char *requestNonceHex);
+std::string canonicalTimeResponse(const char *deviceId,
+                                  const char *requestNonceHex,
+                                  uint64_t serverTimestamp);
+
+bool buildTimeHeaders(const String &deviceId,
+                      const uint8_t hmacKey[kHmacKeyBytes],
+                      TimeHeaders &headers, std::string &error);
+
+bool verifyTimeResponse(const String &deviceId,
+                        const TimeHeaders &requestHeaders,
+                        uint64_t serverTimestamp,
+                        const String &responseNonce,
+                        const String &responseSignature,
+                        const uint8_t hmacKey[kHmacKeyBytes],
+                        std::string &error);
 
 // Parses a bounded JSON object and requires both protocol_version and status
 // to be present with the correct JSON types. Unknown fields are allowed, but

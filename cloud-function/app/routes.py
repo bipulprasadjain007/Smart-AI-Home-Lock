@@ -54,6 +54,8 @@ from app.protocol import (
     canonical_query_string,
     reserve_replay,
     sign_request,
+    sign_time_request,
+    sign_time_response,
 )
 from app.similarity import cosine_similarity, validate_embedding  # compatibility exports
 
@@ -163,6 +165,9 @@ def register_routes(app):
         methods=["GET"],
     )
     app.add_url_rule("/api/health", "health", health, methods=["GET"])
+    app.add_url_rule(
+        "/api/device_time", "device_time", device_time, methods=["GET"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1887,3 +1892,58 @@ def health():
     """The only production endpoint intentionally left public."""
 
     return _response({"status": "ok"}, 200)
+
+
+def device_time():
+    """Return a device-authenticated timestamp for secure clock bootstrap.
+
+    The request cannot depend on a trustworthy device clock, so it uses a
+    random challenge and a separate HMAC domain.  The signed response is bound
+    to that challenge and is never accepted by an unlock route.
+    """
+
+    try:
+        if request.query_string or request.content_length not in (None, 0):
+            raise ProtocolError("invalid time request", 400)
+        if request.headers.get("X-Time-Protocol-Version") != "1":
+            raise ProtocolError("invalid time request", 401)
+
+        device_id = request.headers.get("X-Device-ID", "")
+        nonce = request.headers.get("X-Time-Nonce", "")
+        signature = request.headers.get("X-Time-Signature", "")
+        if not DEVICE_ID_RE.fullmatch(device_id):
+            raise ProtocolError("invalid time request", 401)
+        if not REQUEST_NONCE_RE.fullmatch(nonce):
+            raise ProtocolError("invalid time request", 401)
+        if not REQUEST_SIGNATURE_RE.fullmatch(signature):
+            raise ProtocolError("invalid time request", 401)
+
+        credentials = current_app.config.get("DEVICE_CREDENTIALS") or {}
+        credential = credentials.get(device_id)
+        if not isinstance(credential, dict) or credential.get("enabled") is not True:
+            raise ProtocolError("invalid time request", 401)
+
+        import hmac
+
+        expected = sign_time_request(credential["key"], device_id, nonce)
+        if not hmac.compare_digest(expected, signature):
+            raise ProtocolError("invalid time request", 401)
+
+        server_timestamp = str(int(time.time()))
+        response_signature = sign_time_response(
+            credential["key"], device_id, nonce, server_timestamp
+        )
+        response = _response(
+            {"status": "ok", "server_time": int(server_timestamp)}, 200
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Time-Protocol-Version"] = "1"
+        response.headers["X-Device-ID"] = device_id
+        response.headers["X-Time-Nonce"] = nonce
+        response.headers["X-Server-Time"] = server_timestamp
+        response.headers["X-Time-Signature"] = response_signature
+        return response
+    except ProtocolError as error:
+        return _known_error_response(error)
+    except Exception as error:
+        return _internal_error("device_time", error)

@@ -7,5 +7,9 @@
   "body_hex": "000102030405060708090a0b101112131415161718191a1b1c1d1e1f746573742d6a706567",
   "body_sha256": "b68e18bc83f6737a96f5053f0ceb9719959ae0b494894598e2c280c35fee685a",
   "canonical": "SAHL-V2\nPOST\n/api/unlock\n\ncam-test-01\n1700000000\n00112233445566778899aabbccddeeff\nb68e18bc83f6737a96f5053f0ceb9719959ae0b494894598e2c280c35fee685a",
-  "signature": "cbcdd277799b1d49129a329ca3ea31e2aa17e0f4241985de4277db6b8a4102e7"
+  "signature": "cbcdd277799b1d49129a329ca3ea31e2aa17e0f4241985de4277db6b8a4102e7",
+  "time_request_canonical": "SAHL-TIME-V1\nGET\n/api/device_time\ncam-test-01\n00112233445566778899aabbccddeeff",
+  "time_request_signature": "62a6a44bb7a7fa90e4a23821e516c1f120868078b9fa322c845866cddfeda710",
+  "time_response_canonical": "SAHL-TIME-V1\nRESPONSE\ncam-test-01\n00112233445566778899aabbccddeeff\n1700000000",
+  "time_response_signature": "e3e07325ed279fa145b147a4cd32af53386cf791835ebaf90e94058d530bfdae"
 }

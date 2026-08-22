@@ -33,6 +33,27 @@ def main() -> None:
     assert vector["request_nonce"] == vector["request_nonce"].lower()
     assert len(vector["request_nonce"]) == 32
 
+    time_request = (
+        "SAHL-TIME-V1\nGET\n/api/device_time\n"
+        f"{vector['device_id']}\n{vector['request_nonce']}"
+    )
+    time_response = (
+        "SAHL-TIME-V1\nRESPONSE\n"
+        f"{vector['device_id']}\n{vector['request_nonce']}\n{vector['timestamp']}"
+    )
+    assert time_request == vector["time_request_canonical"]
+    assert time_response == vector["time_response_canonical"]
+    assert hmac.new(
+        bytes.fromhex(vector["hmac_key_hex"]),
+        time_request.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest() == vector["time_request_signature"]
+    assert hmac.new(
+        bytes.fromhex(vector["hmac_key_hex"]),
+        time_response.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest() == vector["time_response_signature"]
+
     aes_vector = json.loads(
         (vector_path.parent / "aes_gcm_vector.json").read_text(encoding="utf-8")
     )

@@ -17,8 +17,12 @@ from app.protocol import (
     ProtocolError,
     canonical_query_string,
     canonical_string,
+    canonical_time_request,
+    canonical_time_response,
     parse_device_credentials,
     sign_request,
+    sign_time_request,
+    sign_time_response,
 )
 # Reuse the dict-backed service fixtures from the route suite without making
 # this file depend on a live Firebase project.
@@ -114,6 +118,79 @@ def test_device_credentials_require_enabled_allow_list():
                 }
             }
         )
+
+
+def test_device_time_challenge_is_clock_independent_and_domain_separated():
+    nonce = "31" * 16
+    request_message = canonical_time_request("cam-1", nonce)
+    response_message = canonical_time_response("cam-1", nonce, 1780000000)
+
+    assert request_message == "SAHL-TIME-V1\nGET\n/api/device_time\ncam-1\n" + nonce
+    assert response_message.endswith("\n1780000000")
+    assert sign_time_request(HMAC_KEY, "cam-1", nonce) != sign_time_response(
+        HMAC_KEY, "cam-1", nonce, 1780000000
+    )
+
+
+def test_device_time_endpoint_authenticates_request_and_response(app, client):
+    _configure_v2(app)
+    nonce = "42" * 16
+    with patch("app.routes.time.time", return_value=1780000000):
+        response = client.get(
+            "/api/device_time",
+            headers={
+                "X-Time-Protocol-Version": "1",
+                "X-Device-ID": "cam-1",
+                "X-Time-Nonce": nonce,
+                "X-Time-Signature": sign_time_request(HMAC_KEY, "cam-1", nonce),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["X-Time-Nonce"] == nonce
+    assert response.headers["X-Server-Time"] == "1780000000"
+    assert response.headers["X-Time-Signature"] == sign_time_response(
+        HMAC_KEY, "cam-1", nonce, 1780000000
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {
+            "X-Time-Protocol-Version": "1",
+            "X-Device-ID": "cam-1",
+            "X-Time-Nonce": "42" * 16,
+            "X-Time-Signature": "00" * 32,
+        },
+        {
+            "X-Time-Protocol-Version": "1",
+            "X-Device-ID": "unknown",
+            "X-Time-Nonce": "42" * 16,
+            "X-Time-Signature": "00" * 32,
+        },
+    ],
+)
+def test_device_time_endpoint_fails_closed(app, client, headers):
+    _configure_v2(app)
+    response = client.get("/api/device_time", headers=headers)
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "invalid time request"}
+
+
+def test_device_time_endpoint_rejects_query_and_body(app, client):
+    _configure_v2(app)
+    nonce = "42" * 16
+    headers = {
+        "X-Time-Protocol-Version": "1",
+        "X-Device-ID": "cam-1",
+        "X-Time-Nonce": nonce,
+        "X-Time-Signature": sign_time_request(HMAC_KEY, "cam-1", nonce),
+    }
+    assert client.get("/api/device_time?extra=1", headers=headers).status_code == 400
+    assert client.get("/api/device_time", headers=headers, data=b"x").status_code == 400
 
 
 def test_v2_high_unlock_requires_signature_and_marks_response(

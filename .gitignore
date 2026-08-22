@@ -18,6 +18,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+**/.pio/
+cloud-function/tools/model-manifest.json
 
 # Dataset (50K files, 398MB — not part of runtime)
 archive/

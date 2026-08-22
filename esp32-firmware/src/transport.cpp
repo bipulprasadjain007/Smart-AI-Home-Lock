@@ -48,6 +48,34 @@ void addSignedHeaders(HTTPClient &http,
   http.addHeader("X-Request-Signature", headers.requestSignature);
 }
 
+void addTimeHeaders(HTTPClient &http,
+                    const Protocol::TimeHeaders &headers) {
+  http.addHeader("X-Time-Protocol-Version", headers.protocolVersion);
+  http.addHeader("X-Device-ID", headers.deviceId);
+  http.addHeader("X-Time-Nonce", headers.requestNonce);
+  http.addHeader("X-Time-Signature", headers.requestSignature);
+}
+
+bool parseUnixTimestamp(const String &value, uint64_t &timestamp) {
+  if (value.length() == 0 || value.length() > 20) {
+    return false;
+  }
+  uint64_t parsed = 0;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    const uint8_t digit = static_cast<uint8_t>(c - '0');
+    if (parsed > (UINT64_MAX - digit) / 10) {
+      return false;
+    }
+    parsed = parsed * 10 + digit;
+  }
+  timestamp = parsed;
+  return true;
+}
+
 bool readBoundedResponse(HTTPClient &http, String &body, String &error) {
   const int contentLength = http.getSize();
   if (contentLength > static_cast<int>(kMaxResponseBytes)) {
@@ -246,6 +274,76 @@ HealthTransportResult Transport::getHealth(
   } else {
     result.error = "health endpoint returned a non-200 status";
   }
+  http.end();
+  return result;
+}
+
+TimeTransportResult Transport::getAuthenticatedTime(
+    const DeviceConfig &config, const Protocol::TimeHeaders &headers) {
+  TimeTransportResult result;
+  if (!config.valid()) {
+    result.error = "invalid device configuration";
+    return result;
+  }
+  if (!ensureWifi(config)) {
+    result.error = "Wi-Fi unavailable before authenticated-time request";
+    return result;
+  }
+
+  NetworkClientSecure tlsClient;
+  configureTls(tlsClient, config);
+  HTTPClient http;
+  http.setConnectTimeout(kTlsTimeoutMs);
+  http.setTimeout(kHttpTimeoutMs);
+  if (!http.begin(tlsClient, urlFor(config, kDeviceTimePath))) {
+    result.error = "authenticated-time HTTP setup failed";
+    return result;
+  }
+
+  static const char *responseHeaders[] = {
+      "X-Time-Protocol-Version", "X-Device-ID", "X-Time-Nonce",
+      "X-Server-Time", "X-Time-Signature"};
+  http.collectHeaders(responseHeaders,
+                      sizeof(responseHeaders) / sizeof(responseHeaders[0]));
+  addTimeHeaders(http, headers);
+
+  feedWatchdog();
+  const int status = http.GET();
+  feedWatchdog();
+  result.httpStatus = status;
+  if (status < 0) {
+    result.state = RequestState::Uncertain;
+    result.error = http.errorToString(status);
+    http.end();
+    return result;
+  }
+  result.state = RequestState::Completed;
+  result.tlsSucceeded = true;
+  if (status != 200 || http.header("X-Time-Protocol-Version") != "1" ||
+      http.header("X-Device-ID") != config.deviceId) {
+    result.error = "authenticated-time endpoint rejected the request";
+    http.end();
+    return result;
+  }
+
+  const String timestampHeader = http.header("X-Server-Time");
+  uint64_t serverTime = 0;
+  if (!parseUnixTimestamp(timestampHeader, serverTime)) {
+    result.error = "authenticated-time timestamp is invalid";
+    http.end();
+    return result;
+  }
+
+  std::string protocolError;
+  result.authenticated = Protocol::verifyTimeResponse(
+      config.deviceId, headers, serverTime, http.header("X-Time-Nonce"),
+      http.header("X-Time-Signature"), config.hmacKey, protocolError);
+  if (!result.authenticated) {
+    result.error = protocolError.c_str();
+    http.end();
+    return result;
+  }
+  result.serverTime = serverTime;
   http.end();
   return result;
 }

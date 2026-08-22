@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cloud:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            cloud-function/requirements.txt
+            cloud-function/tests/requirements-test.txt
+      - name: Install cloud dependencies
+        env:
+          CC: gcc
+          CXX: g++
+        run: python -m pip install -r cloud-function/tests/requirements-test.txt
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Run cloud tests
+        working-directory: cloud-function
+        run: python -m pytest -q
+      - name: Run source checks
+        run: |
+          python -m compileall -q cloud-function main.py pin.py esp32-firmware/tools
+          bash -n cloud-function/deploy.sh cloud-function/tools/verify_infrastructure.sh
+
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Run host protocol checks
+        run: |
+          python esp32-firmware/tools/test_protocol_vectors.py
+          python esp32-firmware/tools/test_firmware_static.py
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.1.18
+      - name: Build development firmware
+        run: pio run -d esp32-firmware -e ai-thinker-esp32-cam
+      - name: Build production firmware
+        run: pio run -d esp32-firmware -e ai-thinker-esp32-cam-production

@@ -4,12 +4,23 @@ Requires mocking of insightface since the buffalo_l model pack
 is 326MB and auto-downloads on first use.
 """
 
+import hashlib
 import os
+import sys
+from types import ModuleType
 import cv2
 import numpy as np
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from app.face import FaceEngine, ModelNotReadyError
+from app.face import FaceEngine, ModelNotReadyError, ModelSupplyChainError
+
+
+def _insightface_modules(face_analysis_class):
+    package = ModuleType("insightface")
+    app_module = ModuleType("insightface.app")
+    app_module.FaceAnalysis = face_analysis_class
+    package.app = app_module
+    return {"insightface": package, "insightface.app": app_module}
 
 
 @pytest.fixture
@@ -19,7 +30,8 @@ def mock_insightface_app():
     The mock simulates a face detection returning a single face
     with a 512-dimensional embedding vector.
     """
-    with patch("insightface.app.FaceAnalysis") as mock_face_analysis_class:
+    mock_face_analysis_class = MagicMock()
+    with patch.dict(sys.modules, _insightface_modules(mock_face_analysis_class)):
         mock_instance = MagicMock()
         mock_face_analysis_class.return_value = mock_instance
 
@@ -47,7 +59,8 @@ def mock_insightface_app():
 @pytest.fixture
 def mock_insightface_no_face():
     """Mock that returns no faces detected."""
-    with patch("insightface.app.FaceAnalysis") as mock_face_analysis_class:
+    mock_face_analysis_class = MagicMock()
+    with patch.dict(sys.modules, _insightface_modules(mock_face_analysis_class)):
         mock_instance = MagicMock()
         mock_face_analysis_class.return_value = mock_instance
         mock_instance.prepare = MagicMock()
@@ -98,6 +111,59 @@ class TestFaceEngineInitialization:
         mock_instance.prepare.side_effect = RuntimeError("Model load failed")
         with pytest.raises(RuntimeError, match="Model load failed"):
             FaceEngine(model_name="buffalo_l")
+
+    def test_production_accepts_generated_manifest_contract(
+        self, mock_insightface_app, tmp_path
+    ):
+        model_dir = tmp_path / "models" / "buffalo_l"
+        model_dir.mkdir(parents=True)
+        files = []
+        for name in ("det_10g.onnx", "w600k_r50.onnx", "2d106det.onnx"):
+            content = name.encode("utf-8")
+            (model_dir / name).write_bytes(content)
+            files.append(
+                {
+                    "name": name,
+                    "expected_size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+        manifest = {
+            "schema_version": 1,
+            "manifest_version": "test-v1",
+            "model_name": "buffalo_l",
+            "artifact_prefix": "private/models/buffalo_l",
+            "verification_status": "verified-at-build-time",
+            "files": files,
+        }
+
+        engine = FaceEngine(
+            model_name="buffalo_l",
+            model_root=str(tmp_path),
+            model_manifest=manifest,
+            production=True,
+            allow_internet_fallback=False,
+        )
+
+        assert engine._artifact_prefix == "private/models/buffalo_l"
+        assert engine._model_manifest["det_10g.onnx"]["size"] > 0
+
+    def test_production_rejects_unverified_manifest(self):
+        manifest = {
+            "schema_version": 1,
+            "manifest_version": "test-v1",
+            "model_name": "buffalo_l",
+            "artifact_prefix": "models/buffalo_l",
+            "verification_status": "pending-live-verification",
+            "files": [],
+        }
+
+        with pytest.raises(ModelSupplyChainError, match="not verified"):
+            FaceEngine(
+                model_manifest=manifest,
+                production=True,
+                allow_internet_fallback=False,
+            )
 
 
 class TestGetEmbedding:

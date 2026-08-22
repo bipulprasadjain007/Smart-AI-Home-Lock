@@ -13,15 +13,17 @@
 #define SAHL_REQUIRE_FLASH_ENCRYPTION 1
 #endif
 
-// This lane currently uses ordinary unauthenticated SNTP only. A production
-// build is intentionally blocked until an authenticated/multi-source time
-// implementation is added; setting SAHL_PRODUCTION cannot silently weaken the
-// time trust gate.
+#ifndef SAHL_REQUIRE_AUTHENTICATED_TIME
+#define SAHL_REQUIRE_AUTHENTICATED_TIME 1
+#endif
+
 #if SAHL_PRODUCTION
 #if !SAHL_REQUIRE_FLASH_ENCRYPTION
 #error "SAHL_PRODUCTION requires SAHL_REQUIRE_FLASH_ENCRYPTION=1"
 #endif
-#error "SAHL_PRODUCTION is blocked until authenticated time trust is implemented"
+#if !SAHL_REQUIRE_AUTHENTICATED_TIME
+#error "SAHL_PRODUCTION requires SAHL_REQUIRE_AUTHENTICATED_TIME=1"
+#endif
 #endif
 
 constexpr size_t kAesKeyBytes = 32;
@@ -40,10 +42,12 @@ constexpr uint32_t kWifiWaitMs = 12000;
 constexpr uint32_t kNtpWaitMs = 15000;
 constexpr uint32_t kTlsTimeoutMs = 15000;
 constexpr uint32_t kHttpTimeoutMs = 15000;
+constexpr uint32_t kAuthenticatedTimeRefreshMs = 60U * 60U * 1000U;
 constexpr time_t kMinimumValidUnixTime = 1700000000;
 
 constexpr const char *kUnlockPath = "/api/unlock";
 constexpr const char *kHealthPath = "/api/health";
+constexpr const char *kDeviceTimePath = "/api/device_time";
 constexpr const char *kDefaultNtpServer = "pool.ntp.org";
 
 struct DeviceConfig {

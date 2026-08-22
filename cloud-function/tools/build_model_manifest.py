@@ -34,7 +34,12 @@ def _sha256(path: Path) -> str:
 def build_manifest(model_dir: Path, version: str, artifact_prefix: str) -> dict:
     if not VERSION_RE.fullmatch(version):
         raise ValueError("version must contain only letters, numbers, '.', '_' or '-'")
-    if not artifact_prefix or artifact_prefix.startswith("/"):
+    if (
+        not artifact_prefix
+        or artifact_prefix.startswith("/")
+        or "\\" in artifact_prefix
+        or any(part in {"", ".", ".."} for part in artifact_prefix.split("/"))
+    ):
         raise ValueError("artifact_prefix must be a non-empty relative path")
 
     files = []

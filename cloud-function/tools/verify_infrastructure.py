@@ -152,8 +152,8 @@ def _validate_manifest(manifest: Any) -> None:
         or any(part in {"", ".", ".."} for part in prefix.split("/"))
     ):
         raise _fail("model manifest artifact_prefix must be a relative path")
-    if "verification_status" not in manifest:
-        raise _fail("model manifest must declare verification_status")
+    if manifest.get("verification_status") != "verified-at-build-time":
+        raise _fail("model manifest must be verified-at-build-time")
 
     files = manifest.get("files")
     if not isinstance(files, list) or {item.get("name") for item in files if isinstance(item, dict)} != EXPECTED_MODEL_FILES:

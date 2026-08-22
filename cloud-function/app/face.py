@@ -94,6 +94,7 @@ class FaceEngine:
             else bool(allow_internet_fallback)
         )
         self._model_files = tuple(model_files or MODEL_FILES)
+        self._artifact_prefix = f"models/{self._model_name}"
         self._model_manifest = self._normalize_manifest(model_manifest)
 
         self._ensure_models(gcs_bucket)
@@ -124,6 +125,27 @@ class FaceEngine:
         manifest_model = value.get("model_name")
         if manifest_model is not None and manifest_model != self._model_name:
             raise ModelSupplyChainError("model manifest name mismatch")
+        if self._production:
+            if value.get("schema_version") != 1:
+                raise ModelSupplyChainError("production model manifest schema mismatch")
+            if manifest_model != self._model_name:
+                raise ModelSupplyChainError("production model manifest name is required")
+            if value.get("verification_status") != "verified-at-build-time":
+                raise ModelSupplyChainError("production model manifest is not verified")
+            version = value.get("manifest_version")
+            if not isinstance(version, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", version
+            ):
+                raise ModelSupplyChainError("production model manifest version is invalid")
+            prefix = value.get("artifact_prefix")
+            if (
+                not isinstance(prefix, str)
+                or prefix.startswith("/")
+                or "\\" in prefix
+                or any(part in {"", ".", ".."} for part in prefix.split("/"))
+            ):
+                raise ModelSupplyChainError("production model artifact prefix is invalid")
+            self._artifact_prefix = prefix.rstrip("/")
 
         entries = value.get("files", value.get("artifacts"))
         if entries is None:
@@ -147,7 +169,10 @@ class FaceEngine:
                 raise ModelSupplyChainError("model manifest contains an unsafe filename")
             if not isinstance(metadata, Mapping):
                 raise ModelSupplyChainError("model manifest metadata is invalid")
-            size = metadata.get("size", metadata.get("size_bytes", metadata.get("bytes")))
+            size = metadata.get(
+                "expected_size_bytes",
+                metadata.get("size", metadata.get("size_bytes", metadata.get("bytes"))),
+            )
             digest = metadata.get("sha256", metadata.get("sha256_hex"))
             try:
                 size = int(size)
@@ -212,7 +237,7 @@ class FaceEngine:
         backup_dir = None
         try:
             for model_file in self._model_files:
-                gcs_path = f"models/{self._model_name}/{model_file}"
+                gcs_path = f"{self._artifact_prefix}/{model_file}"
                 blob = gcs_bucket.blob(gcs_path)
                 exists = getattr(blob, "exists", None)
                 if callable(exists) and not exists():

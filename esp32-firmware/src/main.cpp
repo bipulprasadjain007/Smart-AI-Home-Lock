@@ -2,6 +2,7 @@
 #include <WiFi.h>
 
 #include <time.h>
+#include <sys/time.h>
 
 #include <vector>
 
@@ -25,13 +26,15 @@ bool cameraReady = false;
 uint32_t lastReconnectAttempt = 0;
 String serialLine;
 bool serialLineOverflow = false;
+bool authenticatedTimeReady = false;
+uint32_t authenticatedTimeAt = 0;
 
 bool unixTimeIsValid() {
   const time_t now = time(nullptr);
   return now >= kMinimumValidUnixTime;
 }
 
-bool waitForValidNtp(const DeviceConfig &config) {
+bool waitForRoughNtp(const DeviceConfig &config) {
   if (unixTimeIsValid()) {
     return true;
   }
@@ -44,15 +47,70 @@ bool waitForValidNtp(const DeviceConfig &config) {
   return unixTimeIsValid();
 }
 
+bool authenticatedTimeIsFresh() {
+  return authenticatedTimeReady && unixTimeIsValid() &&
+         millis() - authenticatedTimeAt < kAuthenticatedTimeRefreshMs;
+}
+
+bool establishAuthenticatedTime(const DeviceConfig &config) {
+  if (authenticatedTimeIsFresh()) {
+    return true;
+  }
+
+  Protocol::TimeHeaders headers;
+  std::string protocolError;
+  if (!Protocol::buildTimeHeaders(config.deviceId, config.hmacKey, headers,
+                                  protocolError)) {
+    Serial.print("Time challenge failed: ");
+    Serial.println(protocolError.c_str());
+    authenticatedTimeReady = false;
+    return false;
+  }
+
+  const TimeTransportResult result =
+      transport.getAuthenticatedTime(config, headers);
+  if (!result.tlsSucceeded || result.httpStatus != 200 ||
+      !result.authenticated || result.serverTime < kMinimumValidUnixTime) {
+    Serial.print("Authenticated time rejected: ");
+    Serial.println(result.error);
+    authenticatedTimeReady = false;
+    return false;
+  }
+
+  timeval verifiedTime = {
+      static_cast<time_t>(result.serverTime),
+      0,
+  };
+  if (settimeofday(&verifiedTime, nullptr) != 0 || !unixTimeIsValid()) {
+    Serial.println("Authenticated time could not be applied");
+    authenticatedTimeReady = false;
+    return false;
+  }
+
+  authenticatedTimeReady = true;
+  authenticatedTimeAt = millis();
+  Serial.println("Device-authenticated time established");
+  return true;
+}
+
 bool prepareNetwork(const DeviceConfig &config) {
   if (!transport.ensureWifi(config)) {
     Serial.println("Wi-Fi unavailable; relay remains off");
     return false;
   }
-  if (!waitForValidNtp(config)) {
-    Serial.println("NTP validity timeout; relay remains off");
+  // SNTP supplies only a rough clock so the configured CA can be evaluated.
+  // It never authorizes an unlock. The device-specific HMAC challenge below
+  // establishes the clock used by signed actuator requests.
+  if (!waitForRoughNtp(config)) {
+    Serial.println("Rough time bootstrap failed; relay remains off");
     return false;
   }
+#if SAHL_REQUIRE_AUTHENTICATED_TIME
+  if (!establishAuthenticatedTime(config)) {
+    Serial.println("Authenticated time unavailable; relay remains off");
+    return false;
+  }
+#endif
   return true;
 }
 
@@ -288,7 +346,10 @@ void loop() {
     lastReconnectAttempt = millis();
     transport.ensureWifi(config);
     if (WiFi.status() == WL_CONNECTED) {
-      waitForValidNtp(config);
+      waitForRoughNtp(config);
+#if SAHL_REQUIRE_AUTHENTICATED_TIME
+      establishAuthenticatedTime(config);
+#endif
     }
   }
   if (!config.valid()) {

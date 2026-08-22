@@ -29,16 +29,41 @@ MAX_IMAGE_BYTES=2097152
 MAX_IMAGE_PIXELS=16777216
 ```
 
+The deployed service also exposes `GET /api/device_time`. It is not a public
+clock: the request must carry a device-generated nonce and HMAC, and the
+response timestamp is bound to that nonce with the same provisioned device
+credential. Firmware must complete this exchange before sending an unlock.
+
 The Cloud Function runtime identity must have Secret Manager Secret Accessor
 permission on both secrets. Do not add either secret to `--set-env-vars`, a
 source archive, or a committed `.env` file.
+
+## Verified model manifest
+
+The three `buffalo_l` ONNX binaries are deployment inputs and are not stored in
+the repository. Generate the ignored runtime manifest from the exact artifacts
+that will be uploaded to the private bucket:
+
+```bash
+python3 cloud-function/tools/build_model_manifest.py \
+  --model-dir /path/to/reviewed/buffalo_l \
+  --version buffalo_l-v1 \
+  --output cloud-function/tools/model-manifest.json
+python3 cloud-function/tools/verify_infrastructure.py manifest \
+  --manifest cloud-function/tools/model-manifest.json
+```
+
+Upload those exact binaries beneath the manifest's `artifact_prefix` and
+publish the same manifest at the `MODEL_MANIFEST_URI`. The deployment preflight
+downloads and hashes each object by default. It rejects missing, pending, or
+handwritten placeholder manifests before invoking a deployment.
 
 ## Explicit local fallback
 
 For local work only, activate the Python environment and run:
 
 ```bash
-source SAHL/bin/activate
+source .venv/bin/activate
 DEPLOY_MODE=local bash cloud-function/deploy.sh
 ```
 
@@ -55,8 +80,8 @@ it on exit. This mode is not suitable for production.
 The repository-root `main.py` is a migration guard and intentionally cannot
 serve requests. Deploying it would fail with migration guidance rather than
 starting the former insecure API. Generate client packets with the root
-`pin.py` or `test-images/images-encryption.py`; both load `AES_KEY` from the
-environment/ignored `.env` and use the cloud AES-256-GCM packet format:
+`pin.py` loads `AES_KEY` from the environment/ignored `.env` and uses the cloud
+AES-256-GCM packet format:
 
 ```text
 nonce (12 bytes) || tag (16 bytes) || ciphertext

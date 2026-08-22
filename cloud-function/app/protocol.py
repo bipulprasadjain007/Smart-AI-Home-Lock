@@ -40,6 +40,9 @@ REQUEST_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
+TIME_PROTOCOL_VERSION = 1
+TIME_PATH = "/api/device_time"
+
 
 class ProtocolError(ValueError):
     """A request failed protocol parsing or authentication."""
@@ -258,6 +261,70 @@ def sign_request(
         timestamp,
         request_nonce_hex,
         sha256_body_hex(body),
+    )
+    return hmac.new(key_bytes, message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def canonical_time_request(device_id: str, request_nonce_hex: str) -> str:
+    """Build the boot-time challenge signed by a provisioned device."""
+
+    if not DEVICE_ID_RE.fullmatch(device_id):
+        raise ProtocolError("invalid device id", 401)
+    if not REQUEST_NONCE_RE.fullmatch(request_nonce_hex):
+        raise ProtocolError("invalid time nonce", 401)
+    return "\n".join(
+        ("SAHL-TIME-V1", "GET", TIME_PATH, device_id, request_nonce_hex)
+    )
+
+
+def sign_time_request(
+    key: bytes | str,
+    device_id: str,
+    request_nonce_hex: str,
+) -> str:
+    """Sign a time challenge that deliberately does not depend on local time."""
+
+    key_bytes = _key_bytes(key)
+    message = canonical_time_request(device_id, request_nonce_hex)
+    return hmac.new(key_bytes, message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def canonical_time_response(
+    device_id: str,
+    request_nonce_hex: str,
+    server_timestamp: str | int,
+) -> str:
+    """Build the response bound to one device-generated time challenge."""
+
+    if not DEVICE_ID_RE.fullmatch(device_id):
+        raise ProtocolError("invalid device id", 401)
+    if not REQUEST_NONCE_RE.fullmatch(request_nonce_hex):
+        raise ProtocolError("invalid time nonce", 401)
+    timestamp_text = str(server_timestamp)
+    if not timestamp_text.isascii() or not timestamp_text.isdigit():
+        raise ProtocolError("invalid server timestamp", 500)
+    return "\n".join(
+        (
+            "SAHL-TIME-V1",
+            "RESPONSE",
+            device_id,
+            request_nonce_hex,
+            timestamp_text,
+        )
+    )
+
+
+def sign_time_response(
+    key: bytes | str,
+    device_id: str,
+    request_nonce_hex: str,
+    server_timestamp: str | int,
+) -> str:
+    """Sign a server timestamp for the matching device challenge."""
+
+    key_bytes = _key_bytes(key)
+    message = canonical_time_response(
+        device_id, request_nonce_hex, server_timestamp
     )
     return hmac.new(key_bytes, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
