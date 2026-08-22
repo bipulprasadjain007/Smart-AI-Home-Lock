@@ -1,7 +1,8 @@
 # ESP32-CAM firmware lane
 
 This is the Day 5-6 firmware lane for an AI Thinker ESP32-CAM. It is a
-PlatformIO Arduino project pinned to `espressif32@6.9.0` (Arduino-ESP32 2.0.17)
+PlatformIO Arduino project pinned to the pioarduino `51.03.07` release
+(Arduino-ESP32 3.0.7)
 and uses only the ESP32 core's bundled mbedTLS for cryptography.
 
 ## Hardware and wiring

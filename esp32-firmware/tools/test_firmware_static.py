@@ -65,6 +65,7 @@ def main() -> None:
     assert "SAHL_PRODUCTION=0" in platformio
     assert "ai-thinker-esp32-cam-production" in platformio
     assert "SAHL_PRODUCTION=1" in platformio
+    assert platformio.count("51.03.07/platform-espressif32.zip") == 2
     assert "SAHL_REQUIRE_FLASH_ENCRYPTION=1" in platformio
     assert "SAHL_REQUIRE_AUTHENTICATED_TIME=1" in platformio
     assert "test_build_src = no" in platformio
