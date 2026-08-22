@@ -44,10 +44,7 @@ class AdminAuthService {
     }
   }
 
-  Future<String?> idToken() async {
-    final User? user = _auth.currentUser;
-    return user == null ? null : user.getIdToken();
-  }
+  Future<String?> idToken() async => _auth.currentUser?.getIdToken();
 
   Future<void> sendPasswordReset(String email) async {
     try {

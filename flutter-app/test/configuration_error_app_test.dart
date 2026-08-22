@@ -8,7 +8,7 @@ void main() {
       const ConfigurationErrorApp(message: 'Missing FIREBASE_PROJECT_ID.'),
     );
 
-    expect(find.byIcon(Icons.settings_alert), findsOneWidget);
+    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
     expect(find.text('App configuration required'), findsOneWidget);
     expect(find.textContaining('FIREBASE_PROJECT_ID'), findsOneWidget);
   });

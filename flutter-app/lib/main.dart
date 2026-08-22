@@ -65,7 +65,7 @@ class ConfigurationErrorApp extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  const Icon(Icons.settings_alert, size: 52),
+                  const Icon(Icons.settings_outlined, size: 52),
                   const SizedBox(height: 16),
                   const Text(
                     'App configuration required',

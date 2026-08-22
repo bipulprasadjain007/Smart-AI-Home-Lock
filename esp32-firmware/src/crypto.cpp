@@ -74,20 +74,14 @@ bool encryptAes256Gcm(const uint8_t *plaintext, size_t plaintextLength,
   mbedtls_gcm_init(&context);
   bool ok =
       mbedtls_gcm_setkey(&context, MBEDTLS_CIPHER_ID_AES, aesKey, 256) == 0;
-  if (ok) {
-    ok = mbedtls_gcm_starts(
-             &context, MBEDTLS_GCM_ENCRYPT, result.data(), kGcmNonceBytes,
-             reinterpret_cast<const uint8_t *>(kGcmAssociatedData),
-             strlen(kGcmAssociatedData)) == 0;
-  }
-  if (ok && plaintextLength != 0) {
-    ok = mbedtls_gcm_update(&context, plaintextLength, plaintext,
-                            result.data() + envelopeBytes) == 0;
-  }
-
   uint8_t tag[kGcmTagBytes] = {};
   if (ok) {
-    ok = mbedtls_gcm_finish(&context, tag, kGcmTagBytes) == 0;
+    ok = mbedtls_gcm_crypt_and_tag(
+             &context, MBEDTLS_GCM_ENCRYPT, plaintextLength, result.data(),
+             kGcmNonceBytes,
+             reinterpret_cast<const uint8_t *>(kGcmAssociatedData),
+             strlen(kGcmAssociatedData), plaintext,
+             result.data() + envelopeBytes, kGcmTagBytes, tag) == 0;
   }
   mbedtls_gcm_free(&context);
 
